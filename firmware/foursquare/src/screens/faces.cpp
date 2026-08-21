@@ -1,4 +1,5 @@
 #include "faces.h"
+#include "extras.h"   // derived screens, widget ids 32+
 #include "display.h"        // for the safe-area constants only
 #include <string.h>
 #include <stdio.h>
@@ -1338,6 +1339,9 @@ static void draw_numeric(GFXcanvas1 &c, uint8_t style, uint8_t val,
 
 void face_render(GFXcanvas1 &c, uint8_t w, uint8_t s, uint8_t ov,
                  const FaceData &d) {
+  // The derived screens are their own family: one layout each, no styles
+  // to cycle, so they short-circuit the whole style machine below.
+  if (extras_is_widget(w)) { extras_face_render(c, w, d); return; }
   // The INVERT bit is stripped here and threaded down as a flag, so every
   // switch below still sees one of the six real styles and no case has to
   // learn about compositing.
@@ -1539,6 +1543,8 @@ const char *overlay_name(uint8_t o) { return o < OV_COUNT ? OVERLAY_NAME[o] : "?
 // it. The host prover walks exactly this predicate, so what it checks and what
 // the menu offers cannot drift apart.
 bool widget_allows(uint8_t w, uint8_t s) {
+  // A derived screen draws itself; OUTLINE is the only style it accepts.
+  if (extras_is_widget(w)) return s == S_OUTLINE;
   // The INVERT bit is a COMPOSITING mode, not a glyph style, so it is decided
   // separately from what the widget can draw. Every widget already has a
   // canonical rendering for a style it cannot honour — a DATE is always two
