@@ -4,6 +4,7 @@
 // it without pulling in Wire and the rest of store.cpp. The defaults are also
 // the thing most worth reading on its own: they are the device as it ships.
 #include "store.h"
+#include "../screens/extras.h"
 #include "../demo.h"   // DEMO_BUILD: the demo's own defaults
 #include "../screens/faces.h"
 #include "../screens/display.h"   // SHIFT_MIN / SHIFT_MAX bound shift_amp
