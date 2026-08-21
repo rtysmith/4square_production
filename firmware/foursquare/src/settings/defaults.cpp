@@ -58,13 +58,13 @@ void settings_defaults(Settings &s) {
   s.led_bright   = DEMO_LED_BRIGHT;
   s.wifi_on      = DEMO_WIFI_ON;
 #endif
-  // The daily screens-off schedule ships DISABLED. The night window above
-  // already dims, and a device that goes dark on its own the first evening you
-  // own it looks broken rather than considerate. The times below are what it
-  // uses once you switch it on, and they are deliberately NOT the same as the
-  // night window — night dims from 22:30 because that is when the room gets
-  // dark, and full-off belongs later, when nobody is looking at it at all.
-  s.off_enable   = 0;
+  // The daily screens-off schedule ships ENABLED: panels off 23:30-06:30 every
+  // day. The night window above dims from 22:30 because that is when the room
+  // gets dark; full-off belongs later, when nobody is looking at it at all.
+  // These are factory defaults only — a record already stored in the EEPROM
+  // ring wins over them, and the AUTO OFF item on the settings page turns the
+  // schedule off if you would rather the clock stayed lit.
+  s.off_enable   = 1;
   s.off_start_h  = 23; s.off_start_m = 30;
   s.off_end_h    = 6;  s.off_end_m   = 30;
 }

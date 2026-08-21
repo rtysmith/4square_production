@@ -78,8 +78,10 @@ MODE leaves. It times out back to the clock after 30 s.
 
 Settings items: LIGHT SENS (auto-dim response), TEMP UNIT (C/F, global),
 AUTO OFF (a daily screens-off window), SLEEP AT and WAKE AT (its times, in
-15 minute steps). The daily auto-off window ships disabled; the overnight
-dim (22:30 to 07:00) ships on.
+15 minute steps). Both ship on: the panels dim from 22:30 to 07:00 and
+switch off entirely from 23:30 to 06:30. Settings already stored in the
+EEPROM win over these defaults, and AUTO OFF on the settings page turns the
+schedule off.
 
 In the demo build the market quotes are baked in and drift on a fixed walk,
 temperatures are in Fahrenheit, and brightness is higher than the shipping
