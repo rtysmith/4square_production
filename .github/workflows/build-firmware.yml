@@ -46,6 +46,13 @@ jobs:
           #endif
           EOF
 
+      - name: Stamp this exact build
+        run: |
+          cat > firmware/foursquare/src/build_info.h <<EOF
+          #pragma once
+          #define FOURSQUARE_BUILD_ID "$GITHUB_RUN_ID"
+          EOF
+
       - name: Build the full image
         run: bash firmware/build.sh full
 
