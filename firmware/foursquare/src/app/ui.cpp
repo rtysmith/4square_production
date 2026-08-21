@@ -364,14 +364,18 @@ static void select_page(uint8_t p, uint32_t now) {
     // press means "show me something else": the first repeat leaves the
     // showreel for the shuffled roster (which restarts its own clock
     // cadence), and every one after that reshuffles.
-    if (p == PG_ANIM) roster_start(now);
+    if (p == PG_ANIM) {
+          // Same button, longer cycle: the per-panel reel first, then every
+          // animation that spans all four panels, then round again.
+          if (extras_wide_next() < 0) roster_start(now);
+        }
     else variant[p] = (uint8_t)((variant[p] + 1) % page_variants(p));
   } else {
     page = p;
   }
   // ARRIVING STARTS THE SHOWREEL IMMEDIATELY — it is the page's first stop,
   // playing before the user's finger is off the button.
-  if (p == PG_ANIM && arriving) showreel_start(now);
+  if (p == PG_ANIM && arriving) { extras_set_wide(-1); showreel_start(now); }
   dirty_screen = true;
   last_input_ms = now;
 }
