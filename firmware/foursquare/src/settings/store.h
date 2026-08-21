@@ -119,7 +119,13 @@ struct Settings {
                              // the right answer for an upgrade.
   uint8_t off_start_h, off_start_m;   // screens go dark at
   uint8_t off_end_h,   off_end_m;     // and come back at
-  uint8_t reserved[2];
+  // ---- added for the editor's button map, in place, same as dim_sens --
+  // Which page each of the four buttons jumps to, packed three bits per
+  // button with bit 15 as the 'somebody set this' marker. Two bytes taken
+  // from reserved[] rather than appended, so the record length — and every
+  // record already in the ring — is unaffected. See btn_page_for() in
+  // screens/extras.h for the encoding.
+  uint8_t btn_map_lo, btn_map_hi;
 };
 
 extern Settings cfg;
