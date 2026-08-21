@@ -57,6 +57,7 @@
 #include "src/screens/anim.h"
 #include "src/net/market.h"
 #include "src/app/ui.h"
+#include "src/net/webcfg.h"  // HTTP layout + browser-friendly updates
 #include "src/app/leds.h"
 #include "src/board/sensors.h"
 // WiFi + OTA credentials. Gitignored, never committed, never printed.
@@ -427,10 +428,12 @@ static void wifi_tick() {
       Serial.print("# wifi up  ip="); Serial.print(WiFi.localIP());
       Serial.print("  rssi=");        Serial.println(WiFi.RSSI());
       if (!ota_up) ota_setup();
+      webcfg_begin();
     }
     ui_env.rssi = WiFi.RSSI();
     ui_env.ota_ready = ota_up;
     ArduinoOTA.handle();
+    webcfg_tick();
     return;
   }
   if (wifi_was_up) {
