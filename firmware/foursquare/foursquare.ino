@@ -402,7 +402,6 @@ static void wifi_attempt() {
 }
 
 static void wifi_tick() {
-  cfg.wifi_on = 1;  // Wireless management is always available on this clock.
   if (!cfg.wifi_on) {
     if (wifi_was_up || WiFi.getMode() != WIFI_OFF) {
       WiFi.disconnect(true);
