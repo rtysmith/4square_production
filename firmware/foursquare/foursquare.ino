@@ -402,6 +402,7 @@ static void wifi_attempt() {
 }
 
 static void wifi_tick() {
+  cfg.wifi_on = 1;  // Wireless management is always available on this clock.
   if (!cfg.wifi_on) {
     if (wifi_was_up || WiFi.getMode() != WIFI_OFF) {
       WiFi.disconnect(true);
@@ -469,6 +470,9 @@ void setup() {
   rtc_begin();
 
   settings_load();
+#ifndef DEMO_BUILD
+  cfg.wifi_on = 1;  // This clock is managed over Wi-Fi; keep its radio enabled.
+#endif
 #ifdef DEMO_BUILD
   // The ring survives a flash, so a previously-used board would come up on its
   // own record. demo_force() re-asserts only the demo's promises, and saves
