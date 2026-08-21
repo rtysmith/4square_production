@@ -29,6 +29,11 @@
 #include "../screens/display.h"
 #include "../app/ui.h"
 #include "../secrets.h"
+#if __has_include("../build_info.h")
+#include "../build_info.h"
+#else
+#define FOURSQUARE_BUILD_ID "unknown"
+#endif
 
 #define WEBCFG_API 1
 
@@ -64,14 +69,14 @@ static uint8_t arg_u8(const char *name, uint8_t fallback, uint8_t hi) {
 static void handle_status() {
   char body[512];
   snprintf(body, sizeof body,
-    "{\"firmware\":\"4square\",\"api\":%d,\"ip\":\"%s\",\"ssid\":\"%s\","
+    "{\"firmware\":\"4square\",\"build_id\":\"%s\",\"api\":%d,\"ip\":\"%s\",\"ssid\":\"%s\","
     "\"rssi\":%d,\"uptime_s\":%lu,\"temp_c10\":%d,\"humidity\":%u,"
     "\"hour24\":%u,\"temp_f\":%u,\"slots\":["
     "{\"widget\":%u,\"style\":%u,\"overlay\":%u},"
     "{\"widget\":%u,\"style\":%u,\"overlay\":%u},"
     "{\"widget\":%u,\"style\":%u,\"overlay\":%u},"
     "{\"widget\":%u,\"style\":%u,\"overlay\":%u}]}",
-    WEBCFG_API,
+    FOURSQUARE_BUILD_ID, WEBCFG_API,
     WiFi.localIP().toString().c_str(), WiFi.SSID().c_str(), (int)WiFi.RSSI(),
     (unsigned long)(millis() / 1000),
     ui_env.sht_ok ? (int)(ui_env.sht_c * 10.0f) : -9999,
