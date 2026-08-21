@@ -197,10 +197,10 @@ static void handle_update_data() {
 
 static void handle_restart() {
   if (!update_authorized()) {
-    send_json(401, "{"ok":false,"error":"wrong update password"}");
+    send_json(401, "{\"ok\":false,\"error\":\"wrong update password\"}");
     return;
   }
-  send_json(200, "{"ok":true,"rebooting":true}");
+  send_json(200, "{\"ok\":true,\"rebooting\":true}");
   delay(250);
   ESP.restart();
 }
