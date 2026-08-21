@@ -35,6 +35,7 @@ enum XWidget : uint8_t {
   X_LIWEEK,       // LinkedIn, gained in the last 7 days
   X_CLOCKHM,      // hour AND minute together, in one panel
   X_DATELINE,     // weekday, day and month together, in one panel
+  X_WEATHER,      // outside: icon, now, today's high, chance of rain
   X_LAST
 };
 
@@ -43,7 +44,15 @@ static const uint8_t X_COUNT = (uint8_t)(X_LAST - X_FEELS);
 
 bool extras_is_widget(uint8_t w);
 const char *extras_widget_name(uint8_t w);
-void extras_face_render(GFXcanvas1 &c, uint8_t w, const FaceData &d);
+// ov is the corner overlay the editor saved for this panel (OV_NONE/SECONDS/
+// AMPM/TEMP/LINKEDIN WEEK). The derived screens draw it themselves —
+// face_render returns early for them, so without this a corner setting would
+// silently do nothing.
+void extras_face_render(GFXcanvas1 &c, uint8_t w, uint8_t ov, const FaceData &d);
+// The weekly LinkedIn gain, drawn small in the bottom-left corner. Shared with
+// faces.cpp so a normal (non-derived) panel can carry the same corner.
+void extras_overlay_week(GFXcanvas1 &c);
+
 
 // ---- animations that cross the bezel ---------------------------------------
 // The four panels are treated as one 256x128 canvas. Each panel renders the
@@ -67,6 +76,11 @@ static const uint8_t XA_COUNT = (uint8_t)(XA_LAST - XA_PACMAN);
 // per-panel reel". Set over HTTP by the designer.
 int  extras_wide_pinned();
 void extras_set_wide(int id);
+// One more press of the animations button. Walks -1 (the per-panel reel) ->
+// each across-all-four animation in turn -> back to -1, so the wide scenes sit
+// in the SAME cycle as everything else that button shows. Returns the new
+// value; -1 means "the caller should restart the normal reel".
+int  extras_wide_next();
 void extras_wide_draw(GFXcanvas1 &c, uint8_t id, uint8_t slot, uint16_t frame);
 
 // ---- the impure edge -------------------------------------------------------
@@ -78,6 +92,13 @@ void extras_set_linkedin(int32_t followers, int32_t gained7d);
 bool extras_linkedin_valid();
 int32_t extras_linkedin_followers();
 int32_t extras_linkedin_gained();
+
+// The forecast, fed the same way: the app fetches it, the clock is handed the
+// finished numbers. Temperatures are tenths of a degree Celsius, pop is a
+// whole percent, icon is 0..7 (clear, partly, cloud, fog, drizzle, rain, snow,
+// storm).
+void extras_set_weather(uint8_t icon, int16_t cur_c10, int16_t max_c10, uint8_t pop);
+bool extras_weather_valid();
 
 // ---- what the four buttons on the back do ----------------------------------
 // The mapping used to be a hardcoded switch in ui.cpp:
