@@ -1,5 +1,6 @@
 // pages.cpp — the four pages, all pure. See pages.h for the grammar.
 #include "pages.h"
+#include "extras.h"   // animations that span all four panels
 #include "anim.h"
 #include "display.h"
 #include <string.h>
@@ -361,6 +362,15 @@ static void render_market(GFXcanvas1 &c, uint8_t slot, uint8_t variant,
 static void render_anim(GFXcanvas1 &c, uint8_t slot, uint8_t variant,
                         const PageData &d) {
   (void)variant;
+  // PINNED WIDE ANIMATION. One scene, four windows onto it, so a sprite
+  // crosses the bezel instead of appearing four times.
+  {
+    const int wide = extras_wide_pinned();
+    if (wide >= 0) {
+      extras_wide_draw(c, (uint8_t)wide, (uint8_t)(slot & 3), d.anim_frame);
+      return;
+    }
+  }
   const uint8_t k = (uint8_t)(slot & 3);
   // THE SCENE DECIDES. The showreel is the page's first stop; the clock
   // interlude is what ui.cpp cuts the shuffled roster to every ~10 s. Both
