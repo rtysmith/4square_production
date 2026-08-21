@@ -1,5 +1,6 @@
 // pages.cpp — the four pages, all pure. See pages.h for the grammar.
 #include "pages.h"
+#include "../settings/store.h"   // cfg.slot_* — the editor writes these
 #include "extras.h"   // animations that span all four panels
 #include "anim.h"
 #include "display.h"
@@ -109,14 +110,24 @@ static void fmt_uptime(char *b, size_t n, uint32_t s) {
 // ============================================================ the clock ====
 static void render_clock(GFXcanvas1 &c, uint8_t slot, uint8_t variant,
                          const PageData &d) {
-  uint8_t style = CLOCK_STYLES[variant % CLOCK_STYLE_N];
-  uint8_t w = CLOCK_W[slot & 3];
+  // THE STORED LAYOUT IS THE CLOCK PAGE. cfg.slot_* is what the editor
+    // (and the settings page) writes; CLOCK_W/CLOCK_OV below are only the
+    // fallback for a byte the sanitiser could not vouch for.
+    uint8_t w = cfg.slot_widget[slot & 3];
+    if (w >= W_COUNT && !(w >= X_FIRST && w < X_FIRST + X_COUNT))
+      w = CLOCK_W[slot & 3];
+    uint8_t ov = cfg.slot_overlay[slot & 3];
+    if (ov >= OV_COUNT) ov = CLOCK_OV[slot & 3];
+    // Variant 0 is the saved look; pressing MODE walks the style table as
+    // it always did, without touching what each panel is showing.
+    uint8_t style = (variant == 0) ? cfg.slot_style[slot & 3]
+                                   : CLOCK_STYLES[variant % CLOCK_STYLE_N];
   // Not every widget can honour every style — DATE is two stacked elements, so
   // a single-string glyph style has nothing to apply to. Falling back keeps
   // the panel legible instead of blank, and widget_allows() is the same
   // predicate the prover walks, so this can never render something unproven.
   if (!widget_allows(w, style)) style = S_OUTLINE;
-  face_render(c, w, style, CLOCK_OV[slot & 3], d.clock);
+  face_render(c, w, style, ov, d.clock);
 }
 
 // =========================================================== the sensors ===
