@@ -1,0 +1,57 @@
+name: Build 4square firmware
+
+# Run this by hand from the Actions tab. It compiles the full build -- WiFi and
+# over-the-air updates included -- using the credentials stored as repository
+# secrets, then attaches the finished firmware as a downloadable file.
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install arduino-cli
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh -s 0.35.3
+          echo "$PWD/bin" >> $GITHUB_PATH
+
+      - name: Install the ESP32 core and libraries
+        run: |
+          arduino-cli config init
+          arduino-cli config add board_manager.additional_urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core update-index
+          arduino-cli core install esp32:esp32
+          arduino-cli lib install "Adafruit GFX Library" "Adafruit SSD1306" "Adafruit BusIO" "Adafruit NeoPixel"
+
+      - name: Write secrets.h from repository secrets
+        env:
+          WIFI_SSID: ${{ secrets.WIFI_SSID }}
+          WIFI_PASS: ${{ secrets.WIFI_PASS }}
+          WIFI_SSID2: ${{ secrets.WIFI_SSID2 }}
+          WIFI_PASS2: ${{ secrets.WIFI_PASS2 }}
+          OTA_PASS_SHA256: ${{ secrets.OTA_PASS_SHA256 }}
+        run: |
+          cat > firmware/foursquare/src/secrets.h <<EOF
+          #pragma once
+          #ifndef DEMO_BUILD
+          static const char *const WIFI_SSID  = "$WIFI_SSID";
+          static const char *const WIFI_PASS  = "$WIFI_PASS";
+          static const char *const WIFI_SSID2 = "${WIFI_SSID2:-$WIFI_SSID}";
+          static const char *const WIFI_PASS2 = "${WIFI_PASS2:-$WIFI_PASS}";
+          #endif
+          #ifndef DEMO_BUILD
+          static const char *const OTA_PASS_SHA256 = "$OTA_PASS_SHA256";
+          #endif
+          EOF
+
+      - name: Build the full image
+        run: bash firmware/build.sh full
+
+      - name: Upload the firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: foursquare-full-firmware
+          path: firmware/out/full/*.bin
+          if-no-files-found: error
