@@ -110,7 +110,11 @@ void settings_sanitize(Settings &s) {
   settings_defaults(d);
 
   for (uint8_t i = 0; i < N_SCREENS; i++) {
-    if (s.slot_widget[i]  >= W_COUNT)  s.slot_widget[i]  = d.slot_widget[i];
+    // Ids 32..50 are the derived screens in screens/extras.h. They are a
+    // legal saved value, so the sanitiser must not treat them as corruption.
+    if (s.slot_widget[i]  >= W_COUNT &&
+        !(s.slot_widget[i] >= X_FIRST && s.slot_widget[i] < X_FIRST + X_COUNT))
+      s.slot_widget[i]  = d.slot_widget[i];
     if (s.slot_style[i]   >= S_COUNT)  s.slot_style[i]   = d.slot_style[i];
     if (s.slot_overlay[i] >= OV_COUNT) s.slot_overlay[i] = d.slot_overlay[i];
     // A style the widget cannot render is in range but still wrong.
