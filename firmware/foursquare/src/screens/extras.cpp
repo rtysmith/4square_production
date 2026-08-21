@@ -196,8 +196,9 @@ bool extras_is_widget(uint8_t w) { return w >= X_FIRST && w < (uint8_t)X_LAST; }
 static const char *const X_NAMES[] = {
   "FEELS", "DEW PT", "ABS RH", "COMFORT", "T TREND", "HI/LO", "RH TREND",
   "DAY NO", "WEEK", "DAYS LEFT", "QUARTER", "MOON", "SEASON", "WIFI",
-  "UPTIME", "LIGHT", "IP", "FOLLOWERS", "7 DAYS"
+  "UPTIME", "LIGHT", "IP", "FOLLOWERS", "7 DAYS", "CLOCK", "DATE"
 };
+
 
 const char *extras_widget_name(uint8_t w) {
   return extras_is_widget(w) ? X_NAMES[w - X_FIRST] : "?";
@@ -402,6 +403,36 @@ void extras_face_render(GFXcanvas1 &c, uint8_t w, const FaceData &d) {
       x_pair(c, "NEW, 7 DAYS", b, 4);
       break;
     }
+    // ---- the two "whole thing in one panel" screens ------------------------
+    // The firmware's own HOUR and MINUTE each own a panel. These put the
+    // reading a person actually asks for into ONE panel, so a single clock
+    // panel and a single date panel can sit next to two other things.
+    case X_CLOCKHM: {
+      uint8_t hh = d.hour;
+      if (!d.hour24) { hh = (uint8_t)(d.hour % 12); if (hh == 0) hh = 12; }
+      snprintf(b, sizeof b, "%u:%02u", (unsigned)hh, (unsigned)d.minute);
+      x_center(c, b, 3, (int16_t)(SAFE_Y0 + 12));
+      if (!d.hour24) x_center(c, d.hour < 12 ? "AM" : "PM", 1,
+                              (int16_t)(SAFE_Y0 + 40));
+      break;
+    }
+    case X_DATELINE: {
+      static const char *const WD[7] =
+        { "SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY",
+          "FRIDAY", "SATURDAY" };
+      static const char *const MO[12] =
+        { "JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+          "JUL", "AUG", "SEP", "OCT", "NOV", "DEC" };
+      const uint8_t wd = (uint8_t)(d.weekday % 7);
+      const uint8_t mo = (uint8_t)((d.month >= 1 && d.month <= 12) ? d.month - 1 : 0);
+      x_center(c, WD[wd], 1, (int16_t)(SAFE_Y0 + 2));
+      snprintf(b, sizeof b, "%u %s", (unsigned)d.day, MO[mo]);
+      x_center(c, b, 3, (int16_t)(SAFE_Y0 + 14));
+      snprintf(b, sizeof b, "%u", (unsigned)d.year);
+      x_center(c, b, 1, (int16_t)(SAFE_Y0 + 42));
+      break;
+    }
+
     default:
       x_pair(c, "EXTRA", "?", 3);
       break;
