@@ -62,3 +62,8 @@ uint8_t ui_page();          // which page is showing, for the serial report
 uint8_t ui_variant();
 uint8_t ui_set_cursor();    // which settings item is selected, for the report
 void    ui_force_repaint();
+
+// Jump to the clock page, drop back to variant 0 (the saved styles) and
+// repaint. This is what an HTTP layout write calls, so a change lands on
+// the glass immediately no matter which page a button press had left up.
+void    ui_show_layout();
