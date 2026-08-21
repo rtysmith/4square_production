@@ -387,12 +387,12 @@ static void ota_setup() {
 // Rather than keep guessing which difference mattered, do what demonstrably
 // works.
 static void wifi_attempt() {
-  WiFi.disconnect(true);
+  WiFi.disconnect(false, false);
   delay(100);
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
   WiFi.setTxPower(WIFI_POWER_11dBm);
-  WiFi.setAutoReconnect(true);
+  WiFi.setAutoReconnect(false);
   const bool two = strcmp(WIFI_SSID, WIFI_SSID2) != 0;
   if (two) wifi_which ^= 1; else wifi_which = 0;
   WiFi.begin(wifi_which ? WIFI_SSID2 : WIFI_SSID,
@@ -404,7 +404,7 @@ static void wifi_attempt() {
 static void wifi_tick() {
   if (!cfg.wifi_on) {
     if (wifi_was_up || WiFi.getMode() != WIFI_OFF) {
-      WiFi.disconnect(true);
+      WiFi.disconnect(false, false);
       WiFi.mode(WIFI_OFF);
       wifi_was_up = false;
       ota_up = false;
@@ -436,12 +436,16 @@ static void wifi_tick() {
     webcfg_tick();
     return;
   }
+  uint32_t now = millis();
   if (wifi_was_up) {
     wifi_was_up = false;
     ui_env.wifi_up = false;
     ui_env.ota_ready = false;
+    // Do not let the stale boot-time deadline turn a transient status change
+    // into an immediate disconnect. Give this association a full recovery
+    // window before deliberately trying the other saved network.
+    next_wifi_try = now + WIFI_RETRY_MS;
   }
-  uint32_t now = millis();
   led_hold(LED_WIFI_JOINING, true);
   if ((int32_t)(now - next_wifi_try) < 0) return;
   // RETRY ON A CLOCK. Gating on the status code failed both ways: re-begin()ing
