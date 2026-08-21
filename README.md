@@ -152,8 +152,8 @@ The credentials are declared `static const` inside `#ifndef DEMO_BUILD`, and
 the OTA password is only ever stored as a digest, so a demo image provably
 contains no credential and a full image contains only what it needs.
 `tools/secretsweep/literals.sh secrets.h` prints the names and values the
-built image should be grepped for; the original flash script does exactly
-that against the `.bin` and refuses to flash on a hit.
+built image should be grepped for; grep the `.bin` for each of them before
+you share an image, and treat any hit in a demo image as a bug.
 
 Once the full build is running on your network, OTA updates go to host
 `foursquare-revo` with `espota.py -a <your OTA password>`.
