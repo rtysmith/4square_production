@@ -77,7 +77,7 @@ static void handle_status() {
     "{\"firmware\":\"4square\",\"build_id\":\"%s\",\"api\":%d,\"ip\":\"%s\",\"ssid\":\"%s\","
     "\"rssi\":%d,\"uptime_s\":%lu,\"temp_c10\":%d,\"humidity\":%u,"
     "\"extras\":1,\"wide\":%d,\"linkedin\":{\"valid\":%s,\"followers\":%ld,\"gained7d\":%ld},"
-    "\"hour24\":%u,\"temp_f\":%u,\"slots\":["
+    "\"hour24\":%u,\"temp_f\":%u,\"page\":%u,\"slots\":["
     "{\"widget\":%u,\"style\":%u,\"overlay\":%u},"
     "{\"widget\":%u,\"style\":%u,\"overlay\":%u},"
     "{\"widget\":%u,\"style\":%u,\"overlay\":%u},"
@@ -90,7 +90,7 @@ static void handle_status() {
     extras_wide_pinned(),
     extras_linkedin_valid() ? "true" : "false",
     (long)extras_linkedin_followers(), (long)extras_linkedin_gained(),
-    (unsigned)cfg.hour24, (unsigned)cfg.temp_unit,
+    (unsigned)cfg.hour24, (unsigned)cfg.temp_unit, (unsigned)ui_page(),
     (unsigned)cfg.slot_widget[0], (unsigned)cfg.slot_style[0], (unsigned)cfg.slot_overlay[0],
     (unsigned)cfg.slot_widget[1], (unsigned)cfg.slot_style[1], (unsigned)cfg.slot_overlay[1],
     (unsigned)cfg.slot_widget[2], (unsigned)cfg.slot_style[2], (unsigned)cfg.slot_overlay[2],
@@ -128,8 +128,37 @@ static void handle_layout() {
   bool save = arg_u8("save", 1, 1) == 1;
   if (save) { settings_mark_dirty(); settings_save(); }
 
-  char body[64];
-  snprintf(body, sizeof body, "{\"ok\":true,\"saved\":%s}", save ? "true" : "false");
+  // SHOW IT NOW. Without this the panels keep whatever they were painting
+  // until something else happens to make them dirty — for an hour digit that
+  // is up to a minute away, which reads as "saving did nothing". Two things
+  // are needed, not one:
+  //
+  //   1. the clock page has to be the page on screen. If the last button
+  //      press left it on sensors, markets or animations, the layout is
+  //      simply not what the glass is showing. ui_button(0) is MODE, and it
+  //      only cycles the clock variant when the clock page is ALREADY up, so
+  //      the guard below matters.
+  //   2. a pinned wide animation covers all four panels by design, so an
+  //      explicit save has to take them back.
+  if (save && extras_wide_pinned() >= 0) extras_set_wide(-1);
+  if (ui_page() != PG_CLOCK) ui_button(0);
+  ui_force_repaint();
+
+  // Echo what the clock actually kept, AFTER sanitising. If a slot comes back
+  // different from what was sent, the editor can say so instead of claiming a
+  // save that the firmware quietly rejected.
+  char body[192];
+  snprintf(body, sizeof body,
+    "{\"ok\":true,\"saved\":%s,\"slots\":["
+    "{\"widget\":%u,\"style\":%u,\"overlay\":%u},"
+    "{\"widget\":%u,\"style\":%u,\"overlay\":%u},"
+    "{\"widget\":%u,\"style\":%u,\"overlay\":%u},"
+    "{\"widget\":%u,\"style\":%u,\"overlay\":%u}]}",
+    save ? "true" : "false",
+    (unsigned)cfg.slot_widget[0], (unsigned)cfg.slot_style[0], (unsigned)cfg.slot_overlay[0],
+    (unsigned)cfg.slot_widget[1], (unsigned)cfg.slot_style[1], (unsigned)cfg.slot_overlay[1],
+    (unsigned)cfg.slot_widget[2], (unsigned)cfg.slot_style[2], (unsigned)cfg.slot_overlay[2],
+    (unsigned)cfg.slot_widget[3], (unsigned)cfg.slot_style[3], (unsigned)cfg.slot_overlay[3]);
   send_json(200, body);
 }
 
