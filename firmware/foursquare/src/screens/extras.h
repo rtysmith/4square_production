@@ -33,8 +33,11 @@ enum XWidget : uint8_t {
   X_IPADDR,       // the address the app talks to
   X_LIFOLLOWERS,  // LinkedIn followers
   X_LIWEEK,       // LinkedIn, gained in the last 7 days
+  X_CLOCKHM,      // hour AND minute together, in one panel
+  X_DATELINE,     // weekday, day and month together, in one panel
   X_LAST
 };
+
 static const uint8_t X_FIRST = (uint8_t)X_FEELS;
 static const uint8_t X_COUNT = (uint8_t)(X_LAST - X_FEELS);
 
