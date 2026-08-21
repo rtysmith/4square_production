@@ -31,6 +31,7 @@
 #include "../screens/display.h"
 #include "../screens/extras.h"
 #include "../app/ui.h"
+#include "../app/leds.h"   // the three status LEDs, editable from the app
 #include "../secrets.h"
 #if __has_include("../build_info.h")
 #include "../build_info.h"
@@ -38,7 +39,7 @@
 #define FOURSQUARE_BUILD_ID "unknown"
 #endif
 
-#define WEBCFG_API 1
+#define WEBCFG_API 4   // 3 = editable button map; 4 = the status LEDs are editable too
 
 static WebServer  server(80);
 static bool       started  = false;
@@ -72,12 +73,14 @@ static uint8_t arg_u8(const char *name, uint8_t fallback, uint8_t hi) {
 }
 
 static void handle_status() {
-  char body[640];
+  char body[780];
   snprintf(body, sizeof body,
     "{\"firmware\":\"4square\",\"build_id\":\"%s\",\"api\":%d,\"ip\":\"%s\",\"ssid\":\"%s\","
     "\"rssi\":%d,\"uptime_s\":%lu,\"temp_c10\":%d,\"humidity\":%u,"
     "\"extras\":1,\"wide\":%d,\"linkedin\":{\"valid\":%s,\"followers\":%ld,\"gained7d\":%ld},"
-    "\"hour24\":%u,\"temp_f\":%u,\"page\":%u,\"slots\":["
+    "\"hour24\":%u,\"temp_f\":%u,\"page\":%u,"
+    "\"buttons\":[%u,%u,%u,%u],"
+    "\"leds\":{\"mode\":%u,\"bright\":%u},\"slots\":["
     "{\"widget\":%u,\"style\":%u,\"overlay\":%u},"
     "{\"widget\":%u,\"style\":%u,\"overlay\":%u},"
     "{\"widget\":%u,\"style\":%u,\"overlay\":%u},"
@@ -91,6 +94,9 @@ static void handle_status() {
     extras_linkedin_valid() ? "true" : "false",
     (long)extras_linkedin_followers(), (long)extras_linkedin_gained(),
     (unsigned)cfg.hour24, (unsigned)cfg.temp_unit, (unsigned)ui_page(),
+    (unsigned)btn_page_for(0), (unsigned)btn_page_for(1),
+    (unsigned)btn_page_for(2), (unsigned)btn_page_for(3),
+    (unsigned)cfg.led_mode, (unsigned)cfg.led_bright,
     (unsigned)cfg.slot_widget[0], (unsigned)cfg.slot_style[0], (unsigned)cfg.slot_overlay[0],
     (unsigned)cfg.slot_widget[1], (unsigned)cfg.slot_style[1], (unsigned)cfg.slot_overlay[1],
     (unsigned)cfg.slot_widget[2], (unsigned)cfg.slot_style[2], (unsigned)cfg.slot_overlay[2],
@@ -141,8 +147,7 @@ static void handle_layout() {
   //   2. a pinned wide animation covers all four panels by design, so an
   //      explicit save has to take them back.
   if (save && extras_wide_pinned() >= 0) extras_set_wide(-1);
-  if (ui_page() != PG_CLOCK) ui_button(0);
-  ui_force_repaint();
+  ui_show_layout();   // clock page, variant 0 (the saved styles), repaint now
 
   // Echo what the clock actually kept, AFTER sanitising. If a slot comes back
   // different from what was sent, the editor can say so instead of claiming a
@@ -177,6 +182,73 @@ static void handle_extras() {
            "{\"ok\":true,\"wide\":%d,\"followers\":%ld,\"gained7d\":%ld}",
            extras_wide_pinned(), (long)extras_linkedin_followers(),
            (long)extras_linkedin_gained());
+  send_json(200, body);
+}
+
+// WHAT THE FOUR BUTTONS ON THE BACK DO.
+//   b0..b3   the page each short press jumps to (0 clock, 1 sensors,
+//            2 markets, 3 animations, 4 settings)
+//   reset=1  back to the factory order
+//   save=0   try it without spending an EEPROM write
+// Holding MODE (LEDs) and holding SET (settings) are deliberately NOT
+// remappable: the hold on SET is the way back into the settings page from
+// anywhere, so it stays put however these four are arranged.
+static void handle_buttons() {
+  if (arg_u8("reset", 0, 1) == 1) btn_map_reset();
+  char name[3] = { 'b', '0', 0 };
+  for (uint8_t i = 0; i < 4; i++) {
+    name[1] = (char)('0' + i);
+    if (server.hasArg(name))
+      btn_page_set(i, arg_u8(name, btn_page_for(i), PG_COUNT - 1));
+  }
+  bool save = arg_u8("save", 1, 1) == 1;
+  if (save) { settings_mark_dirty(); settings_save(); }
+
+  char body[128];
+  snprintf(body, sizeof body,
+           "{\"ok\":true,\"saved\":%s,\"buttons\":[%u,%u,%u,%u]}",
+           save ? "true" : "false",
+           (unsigned)btn_page_for(0), (unsigned)btn_page_for(1),
+           (unsigned)btn_page_for(2), (unsigned)btn_page_for(3));
+  send_json(200, body);
+}
+
+// THE THREE STATUS LEDS on the back edge, from the app.
+//   mode=0|1    off, or the status light
+//   bright=..   how bright, 0-255, still scaled by the room's light
+//   fire=<id>   play one signal now, so you can learn what it looks like
+//   test=0      stop whatever is playing
+// IDLE STAYS DARK either way. mode=1 does not light the LEDs up and leave
+// them lit; it lets events — joining, joined, a save, a fault — show
+// themselves and then go quiet again. That is the design of the thing and
+// there is no setting here that turns it into an always-on lamp.
+static void handle_leds() {
+  bool touched = false;
+  if (server.hasArg("mode")) {
+    cfg.led_mode = arg_u8("mode", cfg.led_mode, 1);
+    if (!cfg.led_mode) led_all_off();
+    touched = true;
+  }
+  if (server.hasArg("bright")) {
+    long v = server.arg("bright").toInt();
+    if (v < 0) v = 0;
+    if (v > 255) v = 255;
+    cfg.led_bright = (uint8_t)v;
+    touched = true;
+  }
+  if (touched) { settings_mark_dirty(); settings_save(); }
+
+  // A test signal is NOT a setting: it is fired and forgotten, so asking for
+  // one never writes the EEPROM. led_fire() clamps to the real state list.
+  if (server.hasArg("fire")) {
+    long s = server.arg("fire").toInt();
+    if (s > 0 && s < LED_COUNT) led_fire((LedStatus)s);
+  }
+  if (arg_u8("stop", 0, 1) == 1) led_all_off();
+
+  char body[96];
+  snprintf(body, sizeof body, "{\"ok\":true,\"mode\":%u,\"bright\":%u}",
+           (unsigned)cfg.led_mode, (unsigned)cfg.led_bright);
   send_json(200, body);
 }
 
@@ -301,6 +373,10 @@ void webcfg_begin() {
   server.on("/api/status", HTTP_GET,  handle_status);
   server.on("/api/layout", HTTP_GET,  handle_layout);
   server.on("/api/layout", HTTP_POST, handle_layout);
+  server.on("/api/leds", HTTP_GET,  handle_leds);
+  server.on("/api/leds", HTTP_POST, handle_leds);
+  server.on("/api/buttons", HTTP_GET,  handle_buttons);
+  server.on("/api/buttons", HTTP_POST, handle_buttons);
   server.on("/api/button", HTTP_GET,  handle_button);
   server.on("/api/button", HTTP_POST, handle_button);
   server.on("/api/extras", HTTP_GET,  handle_extras);
