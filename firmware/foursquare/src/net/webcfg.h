@@ -9,7 +9,7 @@
 // Start the HTTP server. Safe to call repeatedly; only the first call binds.
 void webcfg_begin();
 
-// Pump the server. Call once per loop, next to ArduinoOTA.handle().
+// Pump the HTTP server while Wi-Fi is connected.
 void webcfg_tick();
 
 // True while an HTTP firmware upload is in flight, so the main loop can leave
