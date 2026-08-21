@@ -4,6 +4,7 @@
 #include "leds.h"
 #include "../net/market.h"
 #include "../screens/anim.h"
+#include "../screens/extras.h"   // btn_page_for(): the editable button map
 #include <string.h>
 #include <stdio.h>
 
@@ -510,12 +511,11 @@ bool ui_input(uint32_t now) {
     if (e == EV_REPEAT) continue;
 
     if (e == EV_SHORT) {
-      switch (i) {
-        case 0: select_page(PG_CLOCK,  now); break;
-        case 1: select_page(PG_SENSOR, now); break;
-        case 2: select_page(PG_MARKET, now); break;
-        default: select_page(PG_ANIM,  now); break;
-      }
+      // The button map is a setting now, not a switch. Default is still
+        // MODE clock / SET sensors / UP markets / DOWN animations.
+        const uint8_t target = btn_page_for(i);
+        if (target == PG_SETTINGS) enter_settings(now);
+        else                       select_page(target, now);
       continue;
     }
 
@@ -545,12 +545,11 @@ void ui_button(uint8_t i, bool long_press) {
     else if (i == 1) enter_settings(now);
     else Serial.println("# nothing bound to a long press on UP/DOWN");
   } else {
-    switch (i) {
-      case 0: select_page(PG_CLOCK,  now); break;
-      case 1: select_page(PG_SENSOR, now); break;
-      case 2: select_page(PG_MARKET, now); break;
-      default: select_page(PG_ANIM,  now); break;
-    }
+    // The button map is a setting now, not a switch. Default is still
+        // MODE clock / SET sensors / UP markets / DOWN animations.
+        const uint8_t target = btn_page_for(i);
+        if (target == PG_SETTINGS) enter_settings(now);
+        else                       select_page(target, now);
   }
 
   Serial.print("# page "); Serial.print(page_name(page));
