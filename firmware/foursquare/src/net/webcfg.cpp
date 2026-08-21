@@ -39,7 +39,7 @@
 #define FOURSQUARE_BUILD_ID "unknown"
 #endif
 
-#define WEBCFG_API 4   // 3 = editable button map; 4 = the status LEDs are editable too
+#define WEBCFG_API 5   // 3 = editable button map; 4 = editable status LEDs; 5 = weather + the +7d corner
 
 static WebServer  server(80);
 static bool       started  = false;
@@ -441,6 +441,46 @@ static void linkedin_tick() {
   http.end();
 }
 
+// ---- the forecast ----------------------------------------------------------
+// Same shape as the LinkedIn read: the app talks to the weather service and
+// hands the clock four small whole numbers, so there is no parser, no API key
+// and no clock in the world that has to understand WMO codes. Every twenty
+// minutes is plenty for a high and a chance of rain.
+static const char *const WEATHER_URL =
+  "https://project--93f6b6d0-48fb-4dbe-87b6-455b65129623.lovable.app/api/public/weather";
+static uint32_t wx_next_ms = 12000;
+
+static void weather_tick() {
+  if (updating) return;
+  if (WiFi.status() != WL_CONNECTED) return;
+  const uint32_t now = millis();
+  if ((int32_t)(now - wx_next_ms) < 0) return;
+  wx_next_ms = now + 20u * 60u * 1000u;
+
+  WiFiClientSecure tls;
+  tls.setInsecure();
+  tls.setTimeout(6);
+  HTTPClient http;
+  if (!http.begin(tls, WEATHER_URL)) return;
+  http.setTimeout(6000);
+  const int code = http.GET();
+  if (code == 200) {
+    const String body = http.getString();
+    bool a = false, b = false, cc = false, dd = false;
+    const long icon = json_long(body, "\"icon\":", &a);
+    const long cur  = json_long(body, "\"cur_c10\":", &b);
+    const long mx   = json_long(body, "\"max_c10\":", &cc);
+    const long pop  = json_long(body, "\"pop\":", &dd);
+    if (a && b) {
+      extras_set_weather((uint8_t)icon, (int16_t)cur,
+                         (int16_t)(cc ? mx : cur), (uint8_t)(dd ? pop : 0));
+    }
+  } else {
+    wx_next_ms = now + 60u * 1000u;
+  }
+  http.end();
+}
+
 void webcfg_tick() {
   if (!started) return;
   server.handleClient();
@@ -466,5 +506,6 @@ void webcfg_tick() {
               ui_env.rh, ui_env.sht_ok, rtc_now(millis()).hour);
 
   linkedin_tick();
+  weather_tick();
 }
 #endif  // !DEMO_BUILD
