@@ -272,6 +272,11 @@ static Ev poll_btn(uint8_t i, uint32_t now) {
 
 // =============================================================== helpers ===
 void ui_force_repaint() { dirty_screen = true; last_min = -1; last_sec = -1; }
+void ui_show_layout() {
+  page = PG_CLOCK;
+  variant[PG_CLOCK] = 0;   // variant 0 == the styles the editor saved
+  ui_force_repaint();
+}
 uint8_t ui_page()       { return page; }
 uint8_t ui_variant()    { return variant[page % PG_COUNT]; }
 uint8_t ui_set_cursor() { return set_cursor; }
