@@ -20,6 +20,7 @@
 
 #ifndef DEMO_BUILD
 #include <WiFi.h>
+#include <ESPmDNS.h>
 #include <WebServer.h>
 #include <Update.h>
 #include <mbedtls/sha256.h>
@@ -34,6 +35,7 @@
 static WebServer  server(80);
 static bool       started  = false;
 static bool       updating = false;
+static bool       update_failed = false;
 
 bool webcfg_updating() { return updating; }
 
@@ -140,9 +142,12 @@ static bool update_authorized() {
 }
 
 static void handle_update_result() {
-  if (Update.hasError()) {
+  if (Update.hasError() || update_failed) {
+    Update.abort();
     updating = false;
     disp_all_off(false);
+    enableLoopWDT();
+    WiFi.setTxPower(WIFI_POWER_11dBm);
     send_json(500, "{\"ok\":false,\"error\":\"the image was rejected\"}");
     return;
   }
@@ -156,6 +161,7 @@ static void handle_update_data() {
   if (up.status == UPLOAD_FILE_START) {
     if (!update_authorized()) return;              // the POST handler answers 401
     updating = true;
+    update_failed = false;
     Serial.printf("# http update start: %s\n", up.filename.c_str());
     // Same three precautions the ArduinoOTA path takes, for the same measured
     // reasons: the loop watchdog cannot see a blocking transfer, 4 KB of I2C
@@ -164,10 +170,17 @@ static void handle_update_data() {
     disableLoopWDT();
     disp_all_off(true);
     WiFi.setTxPower(WIFI_POWER_19_5dBm);
-    if (!Update.begin(UPDATE_SIZE_UNKNOWN)) Update.printError(Serial);
+    if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
+      update_failed = true;
+      Update.printError(Serial);
+    }
   } else if (up.status == UPLOAD_FILE_WRITE) {
-    if (!updating) return;
-    if (Update.write(up.buf, up.currentSize) != up.currentSize) Update.printError(Serial);
+    if (!updating || update_failed) return;
+    if (Update.write(up.buf, up.currentSize) != up.currentSize) {
+      update_failed = true;
+      Update.abort();
+      Update.printError(Serial);
+    }
   } else if (up.status == UPLOAD_FILE_END) {
     if (!updating) return;
     if (Update.end(true)) Serial.printf("# http update ok: %u bytes\n", up.totalSize);
@@ -175,8 +188,21 @@ static void handle_update_data() {
   } else if (up.status == UPLOAD_FILE_ABORTED) {
     Update.abort();
     updating = false;
+    update_failed = true;
     disp_all_off(false);
+    enableLoopWDT();
+    WiFi.setTxPower(WIFI_POWER_11dBm);
   }
+}
+
+static void handle_restart() {
+  if (!update_authorized()) {
+    send_json(401, "{"ok":false,"error":"wrong update password"}");
+    return;
+  }
+  send_json(200, "{"ok":true,"rebooting":true}");
+  delay(250);
+  ESP.restart();
 }
 
 // WHY THE RADIO KEPT DISAPPEARING: the ESP32 default is modem sleep, which
@@ -192,7 +218,12 @@ void webcfg_begin() {
 
   WiFi.setSleep(false);          // never park the receiver
   WiFi.setAutoReconnect(true);   // the stack retries without our help
-  WiFi.persistent(true);         // credentials survive a brownout
+  WiFi.persistent(false);        // credentials are compiled in; avoid needless flash writes
+
+  if (MDNS.begin("foursquare-revo")) {
+    MDNS.addService("http", "tcp", 80);
+    MDNS.addServiceTxt("http", "tcp", "device", "4square");
+  }
 
 
   server.on("/api/status", HTTP_GET,  handle_status);
@@ -200,6 +231,7 @@ void webcfg_begin() {
   server.on("/api/layout", HTTP_POST, handle_layout);
   server.on("/api/button", HTTP_GET,  handle_button);
   server.on("/api/button", HTTP_POST, handle_button);
+  server.on("/api/restart", HTTP_POST, handle_restart);
   server.on("/api/update", HTTP_POST,
             []() { if (!update_authorized()) { send_json(401, "{\"ok\":false,\"error\":\"wrong update password\"}"); return; }
                    handle_update_result(); },
@@ -217,17 +249,5 @@ void webcfg_begin() {
 void webcfg_tick() {
   if (!started) return;
   server.handleClient();
-
-  // Reassociation watchdog: cheap, and the only thing that survives an AP
-  // reboot or a channel change. Ten seconds is slow enough that it never
-  // fights the stack's own retry, fast enough that you never notice.
-  static uint32_t last_check = 0;
-  uint32_t now = millis();
-  if (now - last_check < 10000) return;
-  last_check = now;
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("# wifi dropped; reconnecting");
-    WiFi.reconnect();
-  }
 }
 #endif  // !DEMO_BUILD
