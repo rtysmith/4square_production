@@ -247,7 +247,6 @@ void webcfg_begin() {
 }
 
 void webcfg_tick() {
-  if (!started) return;
-  server.handleClient();
+  if (started) server.handleClient();
 }
 #endif  // !DEMO_BUILD
