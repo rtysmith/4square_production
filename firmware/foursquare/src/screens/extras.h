@@ -75,3 +75,52 @@ void extras_set_linkedin(int32_t followers, int32_t gained7d);
 bool extras_linkedin_valid();
 int32_t extras_linkedin_followers();
 int32_t extras_linkedin_gained();
+
+// ---- what the four buttons on the back do ----------------------------------
+// The mapping used to be a hardcoded switch in ui.cpp:
+//
+//   MODE (top left) clock   SET (bottom left) sensors
+//   UP (top right) markets  DOWN (bottom right) animations
+//
+// It now lives in the settings record so the editor can change it. It is
+// packed three bits per button into the two spare bytes that were already
+// reserved, which keeps sizeof(Settings) — and therefore the EEPROM record
+// length — exactly as it was. Bit 15 is the "somebody set this" marker, so a
+// record written by older firmware (all zeros there) still reads back as the
+// factory order below rather than as "every button means clock".
+#include "../settings/store.h"
+#include "pages.h"
+
+static const uint8_t BTN_FACTORY[4] = { PG_CLOCK, PG_SENSOR, PG_MARKET, PG_ANIM };
+static const uint16_t BTN_MAP_SET = 0x8000;
+
+static inline uint16_t btnmap_raw() {
+  return (uint16_t)cfg.btn_map_lo | ((uint16_t)cfg.btn_map_hi << 8);
+}
+
+/** Which page button i jumps to. Falls back to the factory order. */
+static inline uint8_t btn_page_for(uint8_t i) {
+  i &= 3;
+  const uint16_t raw = btnmap_raw();
+  if (!(raw & BTN_MAP_SET)) return BTN_FACTORY[i];
+  const uint8_t p = (uint8_t)((raw >> (i * 3)) & 7);
+  return (p < PG_COUNT) ? p : BTN_FACTORY[i];
+}
+
+/** Point button i at a page. Ignores a page id that does not exist. */
+static inline void btn_page_set(uint8_t i, uint8_t page) {
+  i &= 3;
+  if (page >= PG_COUNT) return;
+  uint16_t raw = btnmap_raw();
+  if (!(raw & BTN_MAP_SET)) {
+    raw = BTN_MAP_SET;
+    for (uint8_t k = 0; k < 4; k++) raw |= (uint16_t)BTN_FACTORY[k] << (k * 3);
+  }
+  raw &= (uint16_t)~(7u << (i * 3));
+  raw |= (uint16_t)(page & 7) << (i * 3);
+  cfg.btn_map_lo = (uint8_t)(raw & 0xFF);
+  cfg.btn_map_hi = (uint8_t)(raw >> 8);
+}
+
+/** Back to MODE/SET/UP/DOWN meaning clock/sensors/markets/animations. */
+static inline void btn_map_reset() { cfg.btn_map_lo = 0; cfg.btn_map_hi = 0; }
