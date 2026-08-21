@@ -22,11 +22,14 @@
 #include <WiFi.h>
 #include <ESPmDNS.h>
 #include <WebServer.h>
+#include <HTTPClient.h>
+#include <WiFiClientSecure.h>
 #include <Update.h>
 #include <mbedtls/sha256.h>
 
 #include "../settings/store.h"
 #include "../screens/display.h"
+#include "../screens/extras.h"
 #include "../app/ui.h"
 #include "../secrets.h"
 #if __has_include("../build_info.h")
@@ -41,6 +44,8 @@ static WebServer  server(80);
 static bool       started  = false;
 static bool       updating = false;
 static bool       update_failed = false;
+static uint32_t   update_activity_ms = 0;
+static const uint32_t UPDATE_STALL_MS = 30000;
 
 bool webcfg_updating() { return updating; }
 
@@ -67,10 +72,11 @@ static uint8_t arg_u8(const char *name, uint8_t fallback, uint8_t hi) {
 }
 
 static void handle_status() {
-  char body[512];
+  char body[640];
   snprintf(body, sizeof body,
     "{\"firmware\":\"4square\",\"build_id\":\"%s\",\"api\":%d,\"ip\":\"%s\",\"ssid\":\"%s\","
     "\"rssi\":%d,\"uptime_s\":%lu,\"temp_c10\":%d,\"humidity\":%u,"
+    "\"extras\":1,\"wide\":%d,\"linkedin\":{\"valid\":%s,\"followers\":%ld,\"gained7d\":%ld},"
     "\"hour24\":%u,\"temp_f\":%u,\"slots\":["
     "{\"widget\":%u,\"style\":%u,\"overlay\":%u},"
     "{\"widget\":%u,\"style\":%u,\"overlay\":%u},"
@@ -81,6 +87,9 @@ static void handle_status() {
     (unsigned long)(millis() / 1000),
     ui_env.sht_ok ? (int)(ui_env.sht_c * 10.0f) : -9999,
     (unsigned)ui_env.rh,
+    extras_wide_pinned(),
+    extras_linkedin_valid() ? "true" : "false",
+    (long)extras_linkedin_followers(), (long)extras_linkedin_gained(),
     (unsigned)cfg.hour24, (unsigned)cfg.temp_unit,
     (unsigned)cfg.slot_widget[0], (unsigned)cfg.slot_style[0], (unsigned)cfg.slot_overlay[0],
     (unsigned)cfg.slot_widget[1], (unsigned)cfg.slot_style[1], (unsigned)cfg.slot_overlay[1],
@@ -99,7 +108,11 @@ static void handle_layout() {
   char names[4][4] = {{'w','0',0,0},{'s','0',0,0},{'o','0',0,0},{0}};
   for (uint8_t i = 0; i < N_SCREENS; i++) {
     names[0][1] = names[1][1] = names[2][1] = (char)('0' + i);
-    cfg.slot_widget[i]  = arg_u8(names[0], cfg.slot_widget[i],  W_COUNT - 1);
+    // The ceiling is the last DERIVED screen, not W_COUNT: ids 32..50 are the
+    // extras in screens/extras.h. settings_sanitize() below still rejects the
+    // gap between the two ranges, so a bad id cannot reach the renderer.
+    cfg.slot_widget[i]  = arg_u8(names[0], cfg.slot_widget[i],
+                                 (uint8_t)(X_FIRST + X_COUNT - 1));
     cfg.slot_style[i]   = arg_u8(names[1], cfg.slot_style[i],   0x7F);
     cfg.slot_overlay[i] = arg_u8(names[2], cfg.slot_overlay[i], OV_COUNT - 1);
   }
@@ -117,6 +130,24 @@ static void handle_layout() {
 
   char body[64];
   snprintf(body, sizeof body, "{\"ok\":true,\"saved\":%s}", save ? "true" : "false");
+  send_json(200, body);
+}
+
+// The derived screens and the wide animations, both writable from the editor.
+//   wide=-1        stop playing an animation across all four panels
+//   wide=64..71    pin one
+//   followers=/gained=  push numbers in directly, instead of waiting for the
+//                       clock's own fifteen-minute fetch
+static void handle_extras() {
+  if (server.hasArg("wide")) extras_set_wide((int)server.arg("wide").toInt());
+  if (server.hasArg("followers"))
+    extras_set_linkedin((int32_t)server.arg("followers").toInt(),
+                        (int32_t)server.arg("gained").toInt());
+  char body[128];
+  snprintf(body, sizeof body,
+           "{\"ok\":true,\"wide\":%d,\"followers\":%ld,\"gained7d\":%ld}",
+           extras_wide_pinned(), (long)extras_linkedin_followers(),
+           (long)extras_linkedin_gained());
   send_json(200, body);
 }
 
@@ -150,6 +181,7 @@ static void handle_update_result() {
   if (Update.hasError() || update_failed) {
     Update.abort();
     updating = false;
+    update_activity_ms = 0;
     disp_all_off(false);
     enableLoopWDT();
     WiFi.setTxPower(WIFI_POWER_11dBm);
@@ -167,6 +199,7 @@ static void handle_update_data() {
     if (!update_authorized()) return;              // the POST handler answers 401
     updating = true;
     update_failed = false;
+    update_activity_ms = millis();
     Serial.printf("# http update start: %s\n", up.filename.c_str());
     // Same three precautions the ArduinoOTA path takes, for the same measured
     // reasons: the loop watchdog cannot see a blocking transfer, 4 KB of I2C
@@ -181,6 +214,7 @@ static void handle_update_data() {
     }
   } else if (up.status == UPLOAD_FILE_WRITE) {
     if (!updating || update_failed) return;
+    update_activity_ms = millis();
     if (Update.write(up.buf, up.currentSize) != up.currentSize) {
       update_failed = true;
       Update.abort();
@@ -193,6 +227,7 @@ static void handle_update_data() {
   } else if (up.status == UPLOAD_FILE_ABORTED) {
     Update.abort();
     updating = false;
+    update_activity_ms = 0;
     update_failed = true;
     disp_all_off(false);
     enableLoopWDT();
@@ -215,14 +250,17 @@ static void handle_restart() {
 // mains-powered clock that saving buys nothing and costs everything — the
 // board stops answering pings for seconds at a time, and a router with an
 // aggressive idle timeout eventually drops the association entirely. So we
-// turn sleep off, ask the stack to reassociate on its own, and keep a slow
-// watchdog below in case the AP reboots underneath us.
+// turn sleep off. Reconnection deliberately remains owned by foursquare.ino's
+// single 20-second retry state machine. Enabling the ESP-IDF auto-reconnector
+// here as well creates two competing owners: one tries to rejoin the previous
+// AP while the other disconnects and tries the fallback AP. That race is what
+// made a brief signal dip turn into a long outage.
 void webcfg_begin() {
   if (started) return;
   started = true;
 
   WiFi.setSleep(false);          // never park the receiver
-  WiFi.setAutoReconnect(true);   // the stack retries without our help
+  WiFi.setAutoReconnect(false);  // one reconnect owner: wifi_tick() only
   WiFi.persistent(false);        // credentials are compiled in; avoid needless flash writes
 
   if (MDNS.begin("foursquare-revo")) {
@@ -236,6 +274,8 @@ void webcfg_begin() {
   server.on("/api/layout", HTTP_POST, handle_layout);
   server.on("/api/button", HTTP_GET,  handle_button);
   server.on("/api/button", HTTP_POST, handle_button);
+  server.on("/api/extras", HTTP_GET,  handle_extras);
+  server.on("/api/extras", HTTP_POST, handle_extras);
   server.on("/api/restart", HTTP_POST, handle_restart);
   server.on("/api/update", HTTP_POST,
             []() { if (!update_authorized()) { send_json(401, "{\"ok\":false,\"error\":\"wrong update password\"}"); return; }
@@ -251,7 +291,75 @@ void webcfg_begin() {
   Serial.println(WiFi.localIP());
 }
 
+// ---- the LinkedIn numbers --------------------------------------------------
+// One small GET every fifteen minutes to the app's public endpoint, which is
+// the thing that keeps a day-by-day history and works out the seven-day gain.
+// The clock caches whatever it last read, so a failed fetch shows the previous
+// number rather than blanking the panel. TLS is unauthenticated on purpose:
+// this is a public counter, there is nothing here worth a certificate store,
+// and the root bundle would cost more flash than the whole extras module.
+static const char *const LINKEDIN_URL =
+  "https://project--93f6b6d0-48fb-4dbe-87b6-455b65129623.lovable.app/api/public/linkedin";
+static uint32_t li_next_ms = 8000;   // first read shortly after the radio is up
+
+static long json_long(const String &body, const char *key, bool *found) {
+  const int at = body.indexOf(key);
+  *found = at >= 0;
+  if (at < 0) return 0;
+  return body.substring(at + (int)strlen(key)).toInt();
+}
+
+static void linkedin_tick() {
+  if (updating) return;
+  if (WiFi.status() != WL_CONNECTED) return;
+  const uint32_t now = millis();
+  if ((int32_t)(now - li_next_ms) < 0) return;
+  li_next_ms = now + 15u * 60u * 1000u;
+
+  WiFiClientSecure tls;
+  tls.setInsecure();
+  tls.setTimeout(6);
+  HTTPClient http;
+  if (!http.begin(tls, LINKEDIN_URL)) return;
+  http.setTimeout(6000);
+  const int code = http.GET();
+  if (code == 200) {
+    const String body = http.getString();
+    bool a = false, b = false;
+    const long followers = json_long(body, "\"followers\":", &a);
+    const long gained    = json_long(body, "\"gained7d\":", &b);
+    if (a) extras_set_linkedin((int32_t)followers, (int32_t)(b ? gained : 0));
+  } else {
+    // Try again sooner than the full period, but not in a tight loop.
+    li_next_ms = now + 60u * 1000u;
+  }
+  http.end();
+}
+
 void webcfg_tick() {
-  if (started) server.handleClient();
+  if (!started) return;
+  server.handleClient();
+
+  // A browser can close or lose Wi-Fi midway through a multipart upload
+  // without WebServer delivering UPLOAD_FILE_ABORTED. Never leave the display
+  // dark, TX power raised, and the loop watchdog disabled indefinitely.
+  if (updating && update_activity_ms != 0 &&
+      (uint32_t)(millis() - update_activity_ms) > UPDATE_STALL_MS) {
+    Serial.println("# http update stalled; restoring normal operation");
+    Update.abort();
+    updating = false;
+    update_failed = true;
+    update_activity_ms = 0;
+    disp_all_off(false);
+    enableLoopWDT();
+    WiFi.setTxPower(WIFI_POWER_11dBm);
+  }
+
+  // The rolling history behind the trend and high/low screens. Cheap, and it
+  // has to run even while the panels are showing something else.
+  extras_tick(millis(), ui_env.sht_ok ? (int16_t)(ui_env.sht_c * 10.0f) : 0,
+              ui_env.rh, ui_env.sht_ok, rtc_now(millis()).hour);
+
+  linkedin_tick();
 }
 #endif  // !DEMO_BUILD
