@@ -1,0 +1,20 @@
+# credentials: never committed
+secrets.h
+firmware/foursquare/src/secrets.h
+
+# build output
+firmware/out/
+firmware/foursquare/build/
+*.elf
+*.map
+
+# prover output
+tools/*/out/
+
+# python
+__pycache__/
+*.pyc
+
+# editors / OS
+.DS_Store
+*.swp
