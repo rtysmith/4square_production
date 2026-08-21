@@ -70,6 +70,21 @@ bool    extras_linkedin_valid()     { return li_valid; }
 int32_t extras_linkedin_followers() { return li_followers; }
 int32_t extras_linkedin_gained()    { return li_gained; }
 
+static uint8_t wx_icon    = 0;
+static int16_t wx_cur_c10 = 0;
+static int16_t wx_max_c10 = 0;
+static uint8_t wx_pop     = 0;
+static bool    wx_valid   = false;
+
+void extras_set_weather(uint8_t icon, int16_t cur_c10, int16_t max_c10, uint8_t pop) {
+  wx_icon    = icon > 7 ? 7 : icon;
+  wx_cur_c10 = cur_c10;
+  wx_max_c10 = max_c10;
+  wx_pop     = pop > 100 ? 100 : pop;
+  wx_valid   = true;
+}
+bool extras_weather_valid() { return wx_valid; }
+
 void extras_tick(uint32_t now_ms, int16_t temp_c10, uint8_t rh, bool sht_ok,
                  uint8_t hour) {
   if (!sht_ok) return;
@@ -196,7 +211,7 @@ bool extras_is_widget(uint8_t w) { return w >= X_FIRST && w < (uint8_t)X_LAST; }
 static const char *const X_NAMES[] = {
   "FEELS", "DEW PT", "ABS RH", "COMFORT", "T TREND", "HI/LO", "RH TREND",
   "DAY NO", "WEEK", "DAYS LEFT", "QUARTER", "MOON", "SEASON", "WIFI",
-  "UPTIME", "LIGHT", "IP", "FOLLOWERS", "7 DAYS", "CLOCK", "DATE"
+  "UPTIME", "LIGHT", "IP", "FOLLOWERS", "7 DAYS", "CLOCK", "DATE", "WEATHER"
 };
 
 
@@ -246,7 +261,127 @@ static void draw_wifi(GFXcanvas1 &c) {
   x_center(c, b, 1, (int16_t)(base + 5));
 }
 
-void extras_face_render(GFXcanvas1 &c, uint8_t w, const FaceData &d) {
+// ---- the corner overlay, drawn by the derived screens themselves -----------
+// face_render() short-circuits for widget ids 32+, so the firmware's own
+// overlay pass never runs on them; that is why setting a corner on a derived
+// panel used to do nothing at all. Seconds are read through a detector because
+// not every FaceData in the wild carries them: if the field is absent the
+// seconds corner simply stays blank instead of failing the build.
+template <class T> static auto x_secs(const T &d, int) -> decltype((int)d.second) {
+  return (int)d.second;
+}
+template <class T> static int x_secs(const T &, long) { return -1; }
+
+// The weekly LinkedIn gain, bottom LEFT, small. Left rather than right so it
+// can sit alongside seconds or a temperature on the same panel without the two
+// colliding.
+void extras_overlay_week(GFXcanvas1 &c) {
+  char t[12];
+  if (!li_valid) snprintf(t, sizeof t, "+--");
+  else           snprintf(t, sizeof t, "%+ld", (long)li_gained);
+  x_text(c, t, 1, (int16_t)(SAFE_Y0 + SAFE_H - 8), SAFE_X0);
+}
+
+static void x_overlay(GFXcanvas1 &c, uint8_t ov, const FaceData &d) {
+  if (ov == 0) return;                      // OV_NONE
+  if (ov == 4) { extras_overlay_week(c); return; }   // OV_LIWEEK, bottom left
+  char t[12];
+  t[0] = 0;
+  if (ov == 1) {                            // OV_SECONDS
+    const int s = x_secs(d, 0);
+    if (s < 0) return;
+    snprintf(t, sizeof t, ":%02d", s % 60);
+  } else if (ov == 2) {                     // OV_AMPM
+    snprintf(t, sizeof t, "%s", d.hour < 12 ? "AM" : "PM");
+  } else if (ov == 3) {                     // OV_TEMP
+    if (d.temp_c10 <= -600) return;
+    const float tc = c_of(d.temp_c10);
+    snprintf(t, sizeof t, "%d%c", (int)lroundf(d.temp_f ? tc * 9.0f / 5.0f + 32.0f : tc),
+             d.temp_f ? 'F' : 'C');
+  } else {
+    return;
+  }
+  const int16_t w = (int16_t)(strlen(t) * 6 - 1);
+  x_text(c, t, 1, (int16_t)(SAFE_Y0 + SAFE_H - 8), (int16_t)(SAFE_X0 + SAFE_W - w));
+}
+
+// ---- the weather icon ------------------------------------------------------
+// Drawn, not written: eight little scenes in a 34x30 box, each built from
+// circles, lines and a cloud made of three overlapping discs.
+static void wx_cloud(GFXcanvas1 &c, int16_t x, int16_t y, bool filled) {
+  if (filled) {
+    c.fillCircle((int16_t)(x + 8), (int16_t)(y + 8), 7, 1);
+    c.fillCircle((int16_t)(x + 18), (int16_t)(y + 6), 9, 1);
+    c.fillCircle((int16_t)(x + 26), (int16_t)(y + 9), 6, 1);
+    c.fillRect(x, (int16_t)(y + 8), 28, 8, 1);
+  } else {
+    c.drawCircle((int16_t)(x + 8), (int16_t)(y + 8), 7, 1);
+    c.drawCircle((int16_t)(x + 18), (int16_t)(y + 6), 9, 1);
+    c.drawCircle((int16_t)(x + 26), (int16_t)(y + 9), 6, 1);
+    c.drawFastHLine(x, (int16_t)(y + 16), 28, 1);
+  }
+}
+
+static void wx_sun(GFXcanvas1 &c, int16_t cx, int16_t cy, int16_t r, bool rays) {
+  c.fillCircle(cx, cy, r, 1);
+  if (!rays) return;
+  for (uint8_t i = 0; i < 8; i++) {
+    const float a = (float)i * 3.14159265f / 4.0f;
+    const int16_t x0 = (int16_t)(cx + cosf(a) * (r + 3));
+    const int16_t y0 = (int16_t)(cy + sinf(a) * (r + 3));
+    const int16_t x1 = (int16_t)(cx + cosf(a) * (r + 6));
+    const int16_t y1 = (int16_t)(cy + sinf(a) * (r + 6));
+    c.drawLine(x0, y0, x1, y1, 1);
+  }
+}
+
+static void wx_icon_draw(GFXcanvas1 &c, uint8_t icon, int16_t x, int16_t y) {
+  switch (icon) {
+    case 0:                                    // clear
+      wx_sun(c, (int16_t)(x + 15), (int16_t)(y + 14), 7, true);
+      break;
+    case 1:                                    // partly cloudy
+      wx_sun(c, (int16_t)(x + 8), (int16_t)(y + 6), 5, true);
+      wx_cloud(c, (int16_t)(x + 2), (int16_t)(y + 8), false);
+      break;
+    case 2:                                    // cloudy
+      wx_cloud(c, (int16_t)(x + 1), (int16_t)(y + 5), false);
+      break;
+    case 3:                                    // fog
+      wx_cloud(c, (int16_t)(x + 1), (int16_t)(y + 1), false);
+      for (uint8_t i = 0; i < 3; i++)
+        c.drawFastHLine((int16_t)(x + 2 + (i & 1) * 4), (int16_t)(y + 20 + i * 4), 24, 1);
+      break;
+    case 4:                                    // drizzle
+    case 5: {                                  // rain
+      wx_cloud(c, (int16_t)(x + 1), (int16_t)(y + 1), icon == 5);
+      const uint8_t drops = icon == 5 ? 4 : 3;
+      for (uint8_t i = 0; i < drops; i++) {
+        const int16_t dx = (int16_t)(x + 5 + i * 7);
+        c.drawLine(dx, (int16_t)(y + 20), (int16_t)(dx - 2), (int16_t)(y + 27), 1);
+      }
+      break;
+    }
+    case 6:                                    // snow
+      wx_cloud(c, (int16_t)(x + 1), (int16_t)(y + 1), false);
+      for (uint8_t i = 0; i < 3; i++) {
+        const int16_t sx = (int16_t)(x + 7 + i * 9);
+        const int16_t sy = (int16_t)(y + 24);
+        c.drawFastHLine((int16_t)(sx - 3), sy, 7, 1);
+        c.drawFastVLine(sx, (int16_t)(sy - 3), 7, 1);
+      }
+      break;
+    default:                                   // storm
+      wx_cloud(c, (int16_t)(x + 1), (int16_t)(y + 1), true);
+      c.drawLine((int16_t)(x + 16), (int16_t)(y + 19), (int16_t)(x + 11), (int16_t)(y + 25), 1);
+      c.drawLine((int16_t)(x + 11), (int16_t)(y + 25), (int16_t)(x + 17), (int16_t)(y + 25), 1);
+      c.drawLine((int16_t)(x + 17), (int16_t)(y + 25), (int16_t)(x + 11), (int16_t)(y + 31), 1);
+      break;
+  }
+}
+
+
+void extras_face_render(GFXcanvas1 &c, uint8_t w, uint8_t ov, const FaceData &d) {
   c.fillScreen(0);
   c.setFont(nullptr);
   c.setTextWrap(false);
@@ -433,10 +568,42 @@ void extras_face_render(GFXcanvas1 &c, uint8_t w, const FaceData &d) {
       break;
     }
 
+    // ---- outside ------------------------------------------------------------
+    // The whole forecast in one panel: the sky as a drawn icon on the left,
+    // and on the right the temperature now, today's high, and the chance of
+    // rain. Units follow the same F/C switch as every other temperature.
+    case X_WEATHER: {
+      if (!wx_valid) { x_pair(c, "WEATHER", "--", 4); break; }
+      const int16_t ix = SAFE_X0;
+      const int16_t iy = (int16_t)(SAFE_Y0 + (SAFE_H - 32) / 2);
+      wx_icon_draw(c, wx_icon, ix, iy);
+
+      const int16_t cx = (int16_t)(SAFE_X0 + 40);
+      const float now_c = (float)wx_cur_c10 / 10.0f;
+      const float max_c = (float)wx_max_c10 / 10.0f;
+      snprintf(b, sizeof b, "%d%c",
+               (int)lroundf(d.temp_f ? now_c * 9.0f / 5.0f + 32.0f : now_c),
+               (char)0xF8);                      // degree glyph in the 5x7 font
+      x_text(c, b, 3, (int16_t)(SAFE_Y0 + 4), cx);
+
+      snprintf(b, sizeof b, "HI %d%c",
+               (int)lroundf(d.temp_f ? max_c * 9.0f / 5.0f + 32.0f : max_c),
+               (char)0xF8);
+      x_text(c, b, 1, (int16_t)(SAFE_Y0 + 30), cx);
+
+      snprintf(b, sizeof b, "RAIN %u%%", (unsigned)wx_pop);
+      x_text(c, b, 1, (int16_t)(SAFE_Y0 + 40), cx);
+      x_bar(c, (int16_t)(SAFE_Y0 + SAFE_H - 6), 6, wx_pop);
+      break;
+    }
+
     default:
       x_pair(c, "EXTRA", "?", 3);
       break;
   }
+
+
+  x_overlay(c, ov, d);
 }
 
 // ===========================================================================
@@ -448,6 +615,12 @@ void extras_set_wide(int id) {
   if (id < 0) { wide_pinned = -1; return; }
   if (id < XA_FIRST || id >= (int)XA_LAST) { wide_pinned = -1; return; }
   wide_pinned = id;
+}
+int extras_wide_next() {
+  if (wide_pinned < 0)                    wide_pinned = (int)XA_FIRST;
+  else if (wide_pinned + 1 >= (int)XA_LAST) wide_pinned = -1;
+  else                                    wide_pinned = wide_pinned + 1;
+  return wide_pinned;
 }
 
 static const int16_t WIDE_W = SCR_W * 2;
