@@ -17,6 +17,14 @@ void webcfg_tick();
 // power-cycles only the radio when the driver itself stops responding.
 void webcfg_wifi_keeper_tick();
 
+// Live recovery state for the physical Wi-Fi panel. Stage values are:
+// 0 live, 1 checking a brief loss, 2 joining, 3 requesting an IP address,
+// 4 waiting to retry, 5 resetting the radio.
+uint8_t webcfg_wifi_stage();
+uint8_t webcfg_wifi_progress();
+uint8_t webcfg_wifi_attempt();
+uint8_t webcfg_wifi_network();
+
 // True while an HTTP firmware upload is in flight, so the main loop can leave
 // the screens and the I2C bus alone.
 bool webcfg_updating();
