@@ -39,7 +39,7 @@
 #define FOURSQUARE_BUILD_ID "unknown"
 #endif
 
-#define WEBCFG_API 13  // 13 = live Wi-Fi recovery stages and DHCP repair
+#define WEBCFG_API 15  // 15 = boot version screen, credits panel, build number
 
 static WebServer  server(80);
 static bool       started  = false;
@@ -52,6 +52,12 @@ static uint32_t   update_activity_ms = 0;
 static uint32_t   update_written = 0;
 static bool       update_finalized = false;
 static const uint32_t UPDATE_STALL_MS = 30000;
+// Non-zero once a handler has promised the browser a reboot. The actual
+// ESP.restart() happens in webcfg_tick() so the HTTP reply gets flushed and
+// the socket closed first; restarting inside the handler made a good install
+// look like a failed one.
+static uint32_t   pending_restart_ms = 0;
+
 
 // ---- Wi-Fi connection keeper ----------------------------------------------
 // There is deliberately ONE owner of WiFi.begin()/disconnect(). The stock
@@ -75,6 +81,7 @@ static uint32_t   wifi_stable_since_ms = 0;
 static uint32_t   wifi_last_radio_ms = 0;
 static uint32_t   wifi_recoveries    = 0;
 static uint32_t   wifi_last_outage_s = 0;
+static uint8_t    wifi_last_failure  = 0;
 
 static const uint32_t WIFI_LOSS_GRACE_MS = 12000u;
 static const uint32_t WIFI_JOIN_LIMIT_MS = 25000u;
@@ -118,10 +125,12 @@ uint8_t webcfg_wifi_progress() {
 
 uint8_t webcfg_wifi_attempt() { return (uint8_t)(wifi_failures + 1u); }
 uint8_t webcfg_wifi_network() { return (uint8_t)(wifi_network + 1u); }
+uint8_t webcfg_wifi_failure() { return wifi_last_failure; }
 
 static void wifi_keeper_start_join(uint32_t now, bool reset_radio) {
   if (reset_radio) {
     Serial.println("# wifi keeper: recycling radio only; displays stay live");
+    wifi_last_failure = 5;
     WiFi.disconnect(true, false);
     WiFi.mode(WIFI_OFF);
     delay(250);
@@ -173,6 +182,7 @@ void webcfg_wifi_keeper_tick() {
     wifi_seen_up = true;
     wifi_joining = false;
     wifi_failures = 0;
+    wifi_last_failure = 0;
     wifi_down_since_ms = 0;
     wifi_dhcp_since_ms = 0;
     wifi_last_up_ms = now;
@@ -208,6 +218,7 @@ void webcfg_wifi_keeper_tick() {
     if (wifi_down_since_ms == 0) wifi_down_since_ms = now == 0 ? 1 : now;
     if ((uint32_t)(now - wifi_dhcp_since_ms) < WIFI_DHCP_LIMIT_MS) return;
     Serial.println("# wifi keeper: associated but no DHCP lease; rejoining");
+    wifi_last_failure = 4;
     wifi_dhcp_since_ms = 0;
     wifi_seen_up = false;
     wifi_joining = false;
@@ -234,6 +245,9 @@ void webcfg_wifi_keeper_tick() {
   if (wifi_joining) {
     if ((uint32_t)(now - wifi_join_since_ms) < WIFI_JOIN_LIMIT_MS) return;
     wifi_joining = false;
+    if (status == WL_NO_SSID_AVAIL) wifi_last_failure = 1;
+    else if (status == WL_CONNECT_FAILED) wifi_last_failure = 2;
+    else wifi_last_failure = 3;
     if (wifi_failures < 250) wifi_failures++;
     const bool have_second = WIFI_SSID2[0] && strcmp(WIFI_SSID, WIFI_SSID2) != 0;
     // Give the known network three complete attempts before trying its peer.
@@ -275,11 +289,11 @@ static uint8_t arg_u8(const char *name, uint8_t fallback, uint8_t hi) {
 }
 
 static void handle_status() {
-  char body[1152];
+  char body[1216];
   snprintf(body, sizeof body,
-    "{\"firmware\":\"4square\",\"build_id\":\"%s\",\"api\":%d,\"ip\":\"%s\",\"ssid\":\"%s\","
+    "{\"firmware\":\"4square\",\"build_id\":\"%s\",\"version\":\"%s\",\"api\":%d,\"ip\":\"%s\",\"ssid\":\"%s\","
     "\"rssi\":%d,\"wifi_recoveries\":%lu,\"last_outage_s\":%lu,"
-    "\"wifi_stage\":%u,\"wifi_progress\":%u,\"wifi_attempt\":%u,\"wifi_network\":%u,"
+    "\"wifi_stage\":%u,\"wifi_progress\":%u,\"wifi_attempt\":%u,\"wifi_network\":%u,\"wifi_failure\":%u,"
     "\"uptime_s\":%lu,\"temp_c10\":%d,\"humidity\":%u,"
     "\"extras\":1,\"wide\":%d,\"linkedin\":{\"valid\":%s,\"followers\":%ld,\"gained7d\":%ld},"
     "\"hour24\":%u,\"temp_f\":%u,\"page\":%u,"
@@ -290,11 +304,13 @@ static void handle_status() {
     "{\"widget\":%u,\"style\":%u,\"overlay\":%u},"
     "{\"widget\":%u,\"style\":%u,\"overlay\":%u},"
     "{\"widget\":%u,\"style\":%u,\"overlay\":%u}]}",
-    FOURSQUARE_BUILD_ID, WEBCFG_API,
+    FOURSQUARE_BUILD_ID, extras_fw_version(), WEBCFG_API,
+
     WiFi.localIP().toString().c_str(), WiFi.SSID().c_str(), (int)WiFi.RSSI(),
     (unsigned long)wifi_recoveries, (unsigned long)wifi_last_outage_s,
     (unsigned)webcfg_wifi_stage(), (unsigned)webcfg_wifi_progress(),
     (unsigned)webcfg_wifi_attempt(), (unsigned)webcfg_wifi_network(),
+    (unsigned)webcfg_wifi_failure(),
     (unsigned long)(millis() / 1000),
     ui_env.sht_ok ? (int)(ui_env.sht_c * 10.0f) : -9999,
     (unsigned)ui_env.rh,
@@ -542,9 +558,13 @@ static void handle_update_result() {
            "{\"ok\":true,\"written\":%lu,\"rebooting\":true}",
            (unsigned long)update_written);
   send_json(200, body);
-  delay(250);
-  ESP.restart();
+  // Do NOT restart inside the handler. ESP.restart() here kills the socket
+  // before WebServer has flushed and closed it, so the browser sees a network
+  // error on a successful install and the clock looks like it never rebooted.
+  // Hand the reboot to webcfg_tick(), one full loop later.
+  pending_restart_ms = millis() + 400;
 }
+
 
 static void handle_update_data() {
   HTTPUpload &up = server.upload();
@@ -599,8 +619,8 @@ static void handle_restart() {
     return;
   }
   send_json(200, "{\"ok\":true,\"rebooting\":true}");
-  delay(250);
-  ESP.restart();
+  pending_restart_ms = millis() + 400;
+
 }
 
 // WHY THE RADIO KEPT DISAPPEARING: the ESP32 default is modem sleep, which
@@ -770,6 +790,16 @@ static void weather_tick() {
 void webcfg_tick() {
   if (!started) return;
   server.handleClient();
+
+  // The deferred reboot promised by /api/update and /api/restart. One extra
+  // handleClient() above has already flushed and closed the reply socket.
+  if (pending_restart_ms != 0 && (int32_t)(millis() - pending_restart_ms) >= 0) {
+    Serial.println("# rebooting into the freshly installed image");
+    Serial.flush();
+    pending_restart_ms = 0;
+    ESP.restart();
+  }
+
 
   // A browser can close or lose Wi-Fi midway through a multipart upload
   // without WebServer delivering UPLOAD_FILE_ABORTED. Never leave the display
