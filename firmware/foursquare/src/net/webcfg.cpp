@@ -26,6 +26,8 @@
 
 
 #include <ESPmDNS.h>
+#include <DNSServer.h>
+#include <Preferences.h>
 #include <WebServer.h>
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
@@ -44,7 +46,7 @@
 #define FOURSQUARE_BUILD_ID "unknown"
 #endif
 
-#define WEBCFG_API 17  // 17 = scan-locked AP selection + deterministic DHCP recovery
+#define WEBCFG_API 23  // 23 = keeper pumps HTTP control + remote feeds itself
 
 static WebServer  server(80);
 static bool       started  = false;
@@ -129,6 +131,121 @@ static int32_t  wifi_net_rssi[2]     = {0, 0};
 static int32_t  wifi_net_chan[2]     = {0, 0};
 static uint8_t  wifi_net_bssid[2][6] = {{0}, {0}};
 
+// The stock sketch only pumps webcfg_tick() from its OTA branch. On some
+// upstream revisions that branch is skipped after the radio comes online, so
+// the HTTP server can answer while these two jobs never run and both panels
+// remain at their initial "STARTING" state forever. The keeper is the one
+// routine guaranteed to run throughout boot and recovery; forward-declare the
+// feed jobs here so an online keeper can drive them independently of OTA.
+static void linkedin_tick();
+static void weather_tick();
+
+// ---- saved Wi-Fi credentials, and the setup access point -------------------
+// Credentials live in NVS (a namespace of their own, untouched by a firmware
+// update) and the compiled secrets.h values are only the fallback for a board
+// that has never been told anything. When there is nothing to join, or three
+// cold-boot attempts in a row fail, the clock brings up its own access point
+// and serves a one-page form instead of retrying into the void.
+static Preferences wifi_prefs;
+static char  cred_ssid[2][33] = {{0}, {0}};
+static char  cred_pass[2][65] = {{0}, {0}};
+static bool  cred_stored = false;   // came from NVS rather than the build
+static bool  cred_loaded = false;
+
+static bool     portal_active = false;
+static uint32_t portal_since_ms = 0;
+static DNSServer portal_dns;
+static char     portal_ip_str[20] = "192.168.4.1";
+static const char PORTAL_SSID[] = "4SQUARE-SETUP";
+// Never a dead end: if credentials exist but the portal opened anyway, reboot
+// after five minutes and give the real network another go.
+static const uint32_t PORTAL_RETRY_MS = 5u * 60u * 1000u;
+static const uint8_t  WIFI_MAX_COLD_ATTEMPTS = 3;
+
+static void wifi_creds_load() {
+  if (cred_loaded) return;
+  cred_loaded = true;
+  cred_stored = false;
+  cred_ssid[0][0] = cred_ssid[1][0] = 0;
+  cred_pass[0][0] = cred_pass[1][0] = 0;
+  if (wifi_prefs.begin("4sqwifi", true)) {
+    const String s1 = wifi_prefs.getString("s1", "");
+    const String p1 = wifi_prefs.getString("p1", "");
+    const String s2 = wifi_prefs.getString("s2", "");
+    const String p2 = wifi_prefs.getString("p2", "");
+    wifi_prefs.end();
+    if (s1.length()) {
+      snprintf(cred_ssid[0], sizeof cred_ssid[0], "%s", s1.c_str());
+      snprintf(cred_pass[0], sizeof cred_pass[0], "%s", p1.c_str());
+      snprintf(cred_ssid[1], sizeof cred_ssid[1], "%s", s2.c_str());
+      snprintf(cred_pass[1], sizeof cred_pass[1], "%s", p2.c_str());
+      cred_stored = true;
+    }
+  }
+  if (!cred_stored) {
+    snprintf(cred_ssid[0], sizeof cred_ssid[0], "%s", WIFI_SSID);
+    snprintf(cred_pass[0], sizeof cred_pass[0], "%s", WIFI_PASS);
+    snprintf(cred_ssid[1], sizeof cred_ssid[1], "%s", WIFI_SSID2);
+    snprintf(cred_pass[1], sizeof cred_pass[1], "%s", WIFI_PASS2);
+  }
+  Serial.printf("# wifi creds: %s (\"%s\" / \"%s\")\n",
+                cred_stored ? "saved on the clock" : "compiled in",
+                cred_ssid[0], cred_ssid[1]);
+}
+
+static const char *net_ssid(uint8_t slot) { wifi_creds_load(); return cred_ssid[slot & 1u]; }
+static const char *net_pass(uint8_t slot) { wifi_creds_load(); return cred_pass[slot & 1u]; }
+static bool net_have_any() { wifi_creds_load(); return cred_ssid[0][0] != 0; }
+static bool net_have_second() {
+  wifi_creds_load();
+  return cred_ssid[1][0] && strcmp(cred_ssid[0], cred_ssid[1]) != 0;
+}
+
+static void wifi_creds_save(const char *s1, const char *p1,
+                            const char *s2, const char *p2) {
+  wifi_prefs.begin("4sqwifi", false);
+  wifi_prefs.putString("s1", s1 ? s1 : "");
+  wifi_prefs.putString("p1", p1 ? p1 : "");
+  wifi_prefs.putString("s2", s2 ? s2 : "");
+  wifi_prefs.putString("p2", p2 ? p2 : "");
+  wifi_prefs.end();
+  cred_loaded = false;
+  Serial.printf("# wifi creds: saved \"%s\"\n", s1 ? s1 : "");
+}
+
+static void wifi_creds_clear() {
+  wifi_prefs.begin("4sqwifi", false);
+  wifi_prefs.clear();
+  wifi_prefs.end();
+  cred_loaded = false;
+  cred_stored = false;
+  Serial.println("# wifi creds: cleared");
+}
+
+bool webcfg_wifi_portal() { return portal_active; }
+const char *webcfg_portal_ssid() { return PORTAL_SSID; }
+const char *webcfg_portal_ip() { return portal_ip_str; }
+
+static void wifi_portal_start(const char *why) {
+  if (portal_active) return;
+  portal_active = true;
+  const uint32_t now = millis();
+  portal_since_ms = now == 0 ? 1u : now;
+  Serial.printf("# wifi setup portal: opening because %s\n", why);
+  WiFi.disconnect(true, false);
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(PORTAL_SSID);
+  snprintf(portal_ip_str, sizeof portal_ip_str, "%s",
+           WiFi.softAPIP().toString().c_str());
+  portal_dns.start(53, "*", WiFi.softAPIP());
+  ui_env.wifi_up = false;
+  ui_env.ota_ready = false;
+  snprintf(ui_env.ip, sizeof ui_env.ip, "%s", portal_ip_str);
+  webcfg_begin();
+  Serial.printf("# wifi setup portal: join \"%s\" then open http://%s\n",
+                PORTAL_SSID, portal_ip_str);
+}
+
 // Stop and restart the station's DHCP client so the next association starts a
 // clean DISCOVER/OFFER exchange. This is the reliable way to clear a stale or
 // half-finished lease; WiFi.config() sentinels behave differently per core.
@@ -171,13 +288,13 @@ static void wifi_scan_begin(uint32_t now) {
 static bool wifi_scan_poll(uint32_t now) {
   const int n = WiFi.scanComplete();
   if (n >= 0) {
-    const bool have_second = WIFI_SSID2[0] && strcmp(WIFI_SSID, WIFI_SSID2) != 0;
+    const bool have_second = net_have_second();
     wifi_net_seen[0] = wifi_net_seen[1] = false;
     for (int i = 0; i < n; i++) {
       const String s = WiFi.SSID(i);
       int slot = -1;
-      if (s == WIFI_SSID) slot = 0;
-      else if (have_second && s == WIFI_SSID2) slot = 1;
+      if (s == net_ssid(0)) slot = 0;
+      else if (have_second && s == net_ssid(1)) slot = 1;
       if (slot < 0) continue;
       const int32_t rssi = WiFi.RSSI(i);
       if (wifi_net_seen[slot] && rssi <= wifi_net_rssi[slot]) continue;
@@ -207,7 +324,7 @@ static bool wifi_scan_poll(uint32_t now) {
 // both are on the air the stronger one wins.
 static void wifi_pick_from_scan(uint32_t now) {
   if (!wifi_scan_fresh(now)) return;
-  const bool have_second = WIFI_SSID2[0] && strcmp(WIFI_SSID, WIFI_SSID2) != 0;
+  const bool have_second = net_have_second();
   if (!have_second) { wifi_network = 0; return; }
   if (wifi_net_seen[0] && wifi_net_seen[1]) {
     wifi_network = wifi_net_rssi[1] > wifi_net_rssi[0] ? 1 : 0;
@@ -224,6 +341,7 @@ bool webcfg_wifi_online() {
 
 uint8_t webcfg_wifi_stage() {
   const uint32_t now = millis();
+  if (portal_active) return 7;
   if (webcfg_wifi_online()) return 0;
   if (WiFi.status() == WL_CONNECTED) return 3;
   if (wifi_joining) return 2;
@@ -255,10 +373,20 @@ uint8_t webcfg_wifi_progress() {
 uint8_t webcfg_wifi_attempt() { return (uint8_t)(wifi_failures + 1u); }
 uint8_t webcfg_wifi_network() { return (uint8_t)(wifi_network + 1u); }
 const char *webcfg_wifi_target_ssid() {
-  const bool have_second = WIFI_SSID2[0] && strcmp(WIFI_SSID, WIFI_SSID2) != 0;
-  return (wifi_network == 1 && have_second) ? WIFI_SSID2 : WIFI_SSID;
+  if (portal_active) return PORTAL_SSID;
+  return (wifi_network == 1 && net_have_second()) ? net_ssid(1) : net_ssid(0);
 }
 uint8_t webcfg_wifi_failure() { return wifi_last_failure; }
+
+// Three failed cold-boot attempts means the saved network is wrong, gone, or
+// was never right. Forget it and ask a human, rather than retrying forever.
+static void wifi_check_giveup() {
+  if (portal_active) return;
+  if (wifi_seen_up || wifi_last_up_ms != 0) return;  // it worked once this boot
+  if (wifi_failures < WIFI_MAX_COLD_ATTEMPTS) return;
+  if (cred_stored) wifi_creds_clear();
+  wifi_portal_start("three failed attempts from a cold start");
+}
 
 static void wifi_keeper_start_join(uint32_t now, bool reset_radio) {
   if (reset_radio) {
@@ -287,9 +415,9 @@ static void wifi_keeper_start_join(uint32_t now, bool reset_radio) {
   wifi_force_dhcp();
 
 
-  const bool have_second = WIFI_SSID2[0] && strcmp(WIFI_SSID, WIFI_SSID2) != 0;
-  const char *ssid = wifi_network == 1 && have_second ? WIFI_SSID2 : WIFI_SSID;
-  const char *pass = wifi_network == 1 && have_second ? WIFI_PASS2 : WIFI_PASS;
+  const bool have_second = net_have_second();
+  const char *ssid = wifi_network == 1 && have_second ? net_ssid(1) : net_ssid(0);
+  const char *pass = wifi_network == 1 && have_second ? net_pass(1) : net_pass(0);
   wifi_dhcp_retries = 0;
   if (reset_radio) wifi_have_bssid = false;
   const uint8_t slot = (wifi_network == 1 && have_second) ? 1 : 0;
@@ -325,6 +453,38 @@ void webcfg_wifi_keeper_tick() {
     extras_cache_restore();
   }
   const uint32_t now = millis();
+
+  // SETUP MODE runs instead of the station machine, and it needs the HTTP
+  // server pumped at full speed rather than four times a second.
+  if (portal_active) {
+    portal_dns.processNextRequest();
+    if (started) server.handleClient();
+    ui_env.wifi_up = false;
+    ui_env.ota_ready = false;
+    extras_feed_note(0, "WIFI SETUP");
+    extras_feed_note(1, "WIFI SETUP");
+    if (pending_restart_ms != 0 && (int32_t)(now - pending_restart_ms) >= 0) {
+      pending_restart_ms = 0;
+      Serial.println("# restarting to join the network you just saved");
+      Serial.flush();
+      ESP.restart();
+    }
+    // Credentials exist but we ended up here anyway: try them again rather
+    // than sitting in setup mode forever.
+    if (net_have_any() && (uint32_t)(now - portal_since_ms) >= PORTAL_RETRY_MS) {
+      Serial.println("# wifi setup portal: retrying the saved network");
+      Serial.flush();
+      ESP.restart();
+    }
+    return;
+  }
+
+  // Nothing to join: become the setup access point immediately.
+  if (!net_have_any()) {
+    wifi_portal_start("no network is saved on the clock");
+    return;
+  }
+
   // Rate limit: the driver's state does not change faster than this and the
   // panels want the cycles more than the radio does.
   static uint32_t last_tick_ms = 0;
@@ -404,10 +564,19 @@ void webcfg_wifi_keeper_tick() {
         MDNS.addServiceTxt("http", "tcp", "device", "4square");
       }
     }
+    // The keeper replaced the stock wifi_tick() call. That old function was
+    // also the only place that called webcfg_tick(), so merely binding port 80
+    // here left the server socket and both remote feeds completely unserviced:
+    // browsers timed out and LinkedIn/weather stayed at STARTING forever. The
+    // keeper is now the single owner of BOTH starting and pumping the service.
+    webcfg_begin();
+    webcfg_tick();
     return;
   }
 
   if (status == WL_CONNECTED && !have_lease) {
+    extras_feed_note(0, "NO IP YET");
+    extras_feed_note(1, "NO IP YET");
     // Associated, waiting on the address. Give DHCP a fair window, then drop
     // the association so the next join asks for a lease from scratch.
     if (wifi_dhcp_since_ms == 0) {
@@ -444,6 +613,8 @@ void webcfg_wifi_keeper_tick() {
     wifi_joining = false;
     wifi_have_bssid = false;  // this AP hands out associations but no leases
     if (wifi_failures < 250) wifi_failures++;
+    wifi_check_giveup();
+    if (portal_active) return;
     // A missing lease is not evidence that the other SSID is in range. Keep
     // retrying the AP the scan selected; only a new scan may switch networks.
     wifi_pick_from_scan(now);
@@ -458,6 +629,8 @@ void webcfg_wifi_keeper_tick() {
   ui_env.wifi_up = false;
   ui_env.ota_ready = false;
   wifi_stable_since_ms = 0;
+  extras_feed_note(0, "NO WIFI");
+  extras_feed_note(1, "NO WIFI");
   if (wifi_down_since_ms == 0) wifi_down_since_ms = now == 0 ? 1 : now;
 
   // Do not tear down a healthy association for a momentary status wobble.
@@ -477,7 +650,9 @@ void webcfg_wifi_keeper_tick() {
     // A cached BSSID that did not answer is worse than no cache: forget it and
     // let the next attempt scan for the AP wherever it now is.
     if (wifi_failures >= 2) wifi_have_bssid = false;
-    const bool have_second = WIFI_SSID2[0] && strcmp(WIFI_SSID, WIFI_SSID2) != 0;
+    wifi_check_giveup();
+    if (portal_active) return;
+    const bool have_second = net_have_second();
     // If the SSID was not even on the air, switch immediately and re-scan -
     // there is nothing to wait for. Otherwise give each network two attempts.
     const bool absent = (wifi_last_failure == 1);
@@ -567,7 +742,7 @@ static uint8_t arg_u8(const char *name, uint8_t fallback, uint8_t hi) {
 static void handle_status() {
   char body[1320];
   snprintf(body, sizeof body,
-    "{\"firmware\":\"4square\",\"build_id\":\"%s\",\"version\":\"%s\",\"api\":%d,\"ip\":\"%s\",\"ssid\":\"%s\","
+    "{\"firmware\":\"4square\",\"build_id\":\"%s\",\"version\":\"%s\",\"api\":%d,\"portal\":%s,\"ip\":\"%s\",\"ssid\":\"%s\","
     "\"rssi\":%d,\"wifi_recoveries\":%lu,\"last_outage_s\":%lu,"
     "\"wifi_stage\":%u,\"wifi_progress\":%u,\"wifi_attempt\":%u,\"wifi_network\":%u,\"wifi_failure\":%u,"
     "\"uptime_s\":%lu,\"temp_c10\":%d,\"humidity\":%u,"
@@ -582,6 +757,7 @@ static void handle_status() {
     "{\"widget\":%u,\"style\":%u,\"overlay\":%u},"
     "{\"widget\":%u,\"style\":%u,\"overlay\":%u}]}",
     FOURSQUARE_BUILD_ID, extras_fw_version(), WEBCFG_API,
+    portal_active ? "true" : "false",
 
     WiFi.localIP().toString().c_str(), WiFi.SSID().c_str(), (int)WiFi.RSSI(),
     (unsigned long)wifi_recoveries, (unsigned long)wifi_last_outage_s,
@@ -911,6 +1087,91 @@ static void handle_restart() {
 // here as well creates two competing owners: one tries to rejoin the previous
 // AP while the other disconnects and tries the fallback AP. That race is what
 // made a brief signal dip turn into a long outage.
+// The setup page itself: one form, no JavaScript, readable on a phone that
+// has just joined an access point with no internet behind it.
+static void handle_portal_root() {
+  cors();
+  String saved1 = net_ssid(0), saved2 = net_ssid(1);
+  String page =
+    F("<!doctype html><html><head><meta charset=utf-8>"
+      "<meta name=viewport content=\"width=device-width,initial-scale=1\">"
+      "<title>4square Wi-Fi setup</title><style>"
+      "body{font:16px system-ui,sans-serif;margin:0;padding:24px;background:#0d0f12;color:#e8eaed}"
+      "h1{font-size:20px;margin:0 0 4px}p{color:#9aa0a6;margin:0 0 20px}"
+      "label{display:block;font-size:13px;color:#9aa0a6;margin-top:12px}"
+      "input{width:100%;box-sizing:border-box;padding:11px;margin-top:4px;font-size:16px;"
+      "border-radius:8px;border:1px solid #333;background:#16191d;color:#e8eaed}"
+      "button{width:100%;margin-top:20px;padding:13px;font-size:16px;font-weight:600;"
+      "border:0;border-radius:8px;background:#3ddc84;color:#06210f}"
+      "</style></head><body><h1>4square Wi-Fi setup</h1>"
+      "<p>Enter the network the clock should join. It saves them, restarts and "
+      "connects. If it cannot join after three tries it comes back here.</p>"
+      "<form method=\"POST\" action=\"/api/wifi\">"
+      "<label>Network name</label><input name=\"ssid\" value=\"");
+  page += saved1;
+  page += F("\" required>"
+      "<label>Password</label><input name=\"pass\" type=\"password\">"
+      "<label>Second network (optional)</label><input name=\"ssid2\" value=\"");
+  page += saved2;
+  page += F("\">"
+      "<label>Second password</label><input name=\"pass2\" type=\"password\">"
+      "<button type=\"submit\">Save and restart</button></form></body></html>");
+  server.send(200, "text/html", page);
+}
+
+// Save credentials and reboot into the station machine. Passwords are written
+// to NVS and never read back out over HTTP.
+static void handle_wifi_save() {
+  const String ssid = server.arg("ssid");
+  if (ssid.length() == 0) {
+    send_json(400, "{\"ok\":false,\"error\":\"network name required\"}");
+    return;
+  }
+  wifi_creds_save(ssid.c_str(), server.arg("pass").c_str(),
+                  server.arg("ssid2").c_str(), server.arg("pass2").c_str());
+  cors();
+  server.send(200, "text/html",
+    "<!doctype html><html><head><meta charset=utf-8><style>"
+    "body{font:16px system-ui,sans-serif;background:#0d0f12;color:#e8eaed;padding:24px}"
+    "</style></head><body><h1>Saved</h1><p>The clock is restarting and joining "
+    "your network. Watch its screens for the address it gets.</p></body></html>");
+  pending_restart_ms = millis() + 800;
+}
+
+// What is saved (names only), so the app can show it without the passwords.
+static void handle_wifi_read() {
+  char body[160];
+  snprintf(body, sizeof body,
+           "{\"ok\":true,\"portal\":%s,\"stored\":%s,\"ssid\":\"%s\",\"ssid2\":\"%s\"}",
+           portal_active ? "true" : "false", cred_stored ? "true" : "false",
+           net_ssid(0), net_ssid(1));
+  send_json(200, body);
+}
+
+// Forget the saved network and come back up as the setup access point.
+static void handle_wifi_forget() {
+  wifi_creds_clear();
+  send_json(200, "{\"ok\":true,\"restarting\":true}");
+  pending_restart_ms = millis() + 400;
+}
+
+// ---- the twenty-second hold on the top-left button -------------------------
+// A full reset with no app, no cable and no menu: hold MODE (top left) for
+// twenty seconds. Saved Wi-Fi credentials are wiped, every setting — layout,
+// button map, LED mode, seconds bar — goes back to the factory values, and the
+// clock reboots straight into the setup access point. Twenty seconds is long
+// enough that no ordinary press, and not even the LED hold, can reach it.
+void webcfg_factory_reset() {
+  Serial.println("# FACTORY RESET: MODE held 20 s — wiping credentials and settings");
+  wifi_creds_clear();
+  settings_defaults(cfg);
+  settings_mark_dirty();
+  settings_save();
+  delay(150);
+  ESP.restart();
+}
+
+
 void webcfg_begin() {
   if (started) return;
   started = true;
@@ -933,12 +1194,20 @@ void webcfg_begin() {
   server.on("/api/extras", HTTP_GET,  handle_extras);
   server.on("/api/extras", HTTP_POST, handle_extras);
   server.on("/api/restart", HTTP_POST, handle_restart);
+  server.on("/api/wifi", HTTP_GET,  handle_wifi_read);
+  server.on("/api/wifi", HTTP_POST, handle_wifi_save);
+  server.on("/api/wifi/forget", HTTP_POST, handle_wifi_forget);
+  server.on("/", HTTP_GET, handle_portal_root);
+  server.on("/setup", HTTP_GET, handle_portal_root);
   server.on("/api/update", HTTP_POST,
             []() { if (!update_authorized()) { send_json(401, "{\"ok\":false,\"error\":\"wrong update password\"}"); return; }
                    handle_update_result(); },
             handle_update_data);
   server.onNotFound([]() {
     if (server.method() == HTTP_OPTIONS) { cors(); server.send(204); return; }
+    // In setup mode every stray request (including the phone's own captive
+    // portal probe) gets the setup form, which is what makes it pop up.
+    if (portal_active && server.method() == HTTP_GET) { handle_portal_root(); return; }
     send_json(404, "{\"ok\":false,\"error\":\"no such endpoint\"}");
   });
 
@@ -1193,6 +1462,9 @@ void webcfg_tick() {
   extras_tick(millis(), ui_env.sht_ok ? (int16_t)(ui_env.sht_c * 10.0f) : 0,
               ui_env.rh, ui_env.sht_ok, rtc_now(millis()).hour);
 
+  // Also pump here for compatibility with existing forks. The keeper now owns
+  // the guaranteed schedule; the per-feed due timestamps prevent duplicate
+  // requests when both call sites run in the same loop.
   linkedin_tick();
   weather_tick();
 }
