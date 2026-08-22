@@ -39,7 +39,7 @@
 #define FOURSQUARE_BUILD_ID "unknown"
 #endif
 
-#define WEBCFG_API 6   // 3 = buttons; 4 = LEDs; 5 = weather + the +7d corner; 6 = ticking/bar seconds
+#define WEBCFG_API 12  // 12 = a top AND a bottom corner per panel (one nibble each)
 
 static WebServer  server(80);
 static bool       started  = false;
@@ -52,6 +52,136 @@ static uint32_t   update_activity_ms = 0;
 static uint32_t   update_written = 0;
 static bool       update_finalized = false;
 static const uint32_t UPDATE_STALL_MS = 30000;
+
+// ---- Wi-Fi connection keeper ----------------------------------------------
+// There is deliberately ONE owner of WiFi.begin()/disconnect(). The stock
+// retry loop and the ESP auto-reconnector used to race one another, turning a
+// one-beacon hiccup into repeated disconnects. This state machine waits out a
+// transient, retries the last good AP first, uses exponential backoff, tries
+// the second AP only after repeated failures, and resets the radio driver
+// without rebooting the clock. A reboot would throw away live display state;
+// this keeper can recover indefinitely while every panel keeps rendering.
+static bool       wifi_seen_up       = false;
+static bool       wifi_joining       = false;
+static uint8_t    wifi_network       = 0;
+static uint8_t    wifi_failures      = 0;
+static uint32_t   wifi_down_since_ms = 0;
+static uint32_t   wifi_join_since_ms = 0;
+static uint32_t   wifi_next_try_ms   = 0;
+static uint32_t   wifi_last_up_ms    = 0;
+static uint32_t   wifi_stable_since_ms = 0;
+static uint32_t   wifi_last_radio_ms = 0;
+static uint32_t   wifi_recoveries    = 0;
+static uint32_t   wifi_last_outage_s = 0;
+
+static const uint32_t WIFI_LOSS_GRACE_MS = 12000u;
+static const uint32_t WIFI_JOIN_LIMIT_MS = 25000u;
+static const uint32_t WIFI_RADIO_RESET_MS = 10u * 60u * 1000u;
+
+static uint32_t wifi_retry_delay(uint8_t failures) {
+  if (failures < 2) return 5000u;
+  if (failures < 4) return 10000u;
+  if (failures < 8) return 30000u;
+  return 60000u;
+}
+
+static void wifi_keeper_start_join(uint32_t now, bool reset_radio) {
+  if (reset_radio) {
+    Serial.println("# wifi keeper: recycling radio only; displays stay live");
+    WiFi.disconnect(true, false);
+    WiFi.mode(WIFI_OFF);
+    delay(250);
+    wifi_last_radio_ms = now;
+  } else {
+    WiFi.disconnect(false, false);
+    delay(40);
+  }
+
+  WiFi.mode(WIFI_STA);
+  WiFi.persistent(false);
+  WiFi.setSleep(false);
+  WiFi.setAutoReconnect(false);
+  WiFi.setTxPower(WIFI_POWER_17dBm);
+
+  const bool have_second = WIFI_SSID2[0] && strcmp(WIFI_SSID, WIFI_SSID2) != 0;
+  const char *ssid = wifi_network == 1 && have_second ? WIFI_SSID2 : WIFI_SSID;
+  const char *pass = wifi_network == 1 && have_second ? WIFI_PASS2 : WIFI_PASS;
+  Serial.printf("# wifi keeper: joining configured network %u
+", (unsigned)(wifi_network + 1));
+  WiFi.begin(ssid, pass);
+  wifi_joining = true;
+  wifi_join_since_ms = now;
+}
+
+void webcfg_wifi_keeper_tick() {
+  // This runs from the main loop even before a network exists, unlike
+  // webcfg_begin(). Restore the last successful remote data at the earliest
+  // possible moment so a cold boot during an outage never produces blanks.
+  static bool restored_remote_data = false;
+  if (!restored_remote_data) {
+    restored_remote_data = true;
+    extras_cache_restore();
+  }
+  const uint32_t now = millis();
+  const wl_status_t status = WiFi.status();
+
+  if (status == WL_CONNECTED) {
+    const bool newly_up = !wifi_seen_up;
+    const uint32_t outage_ms = wifi_down_since_ms ? (uint32_t)(now - wifi_down_since_ms) : 0;
+    wifi_seen_up = true;
+    wifi_joining = false;
+    wifi_failures = 0;
+    wifi_down_since_ms = 0;
+    wifi_last_up_ms = now;
+    ui_env.wifi_up = true;
+    ui_env.rssi = WiFi.RSSI();
+    if (newly_up) {
+      wifi_stable_since_ms = now == 0 ? 1 : now;
+      if (outage_ms) {
+        wifi_last_outage_s = outage_ms / 1000u;
+        wifi_recoveries++;
+      }
+      Serial.print("# wifi keeper: online at ");
+      Serial.println(WiFi.localIP());
+      led_hold(LED_WIFI_JOINING, false);
+      // mDNS can lose its netif when the radio is recycled. Rebind it on every
+      // recovered association so foursquare-revo.local remains dependable.
+      MDNS.end();
+      if (MDNS.begin("foursquare-revo")) {
+        MDNS.addService("http", "tcp", 80);
+        MDNS.addServiceTxt("http", "tcp", "device", "4square");
+      }
+    }
+    return;
+  }
+
+  ui_env.wifi_up = false;
+  ui_env.ota_ready = false;
+  wifi_stable_since_ms = 0;
+  if (wifi_down_since_ms == 0) wifi_down_since_ms = now == 0 ? 1 : now;
+
+  // Do not tear down a healthy association for a momentary status wobble.
+  if (wifi_seen_up && (uint32_t)(now - wifi_last_up_ms) < WIFI_LOSS_GRACE_MS) return;
+  wifi_seen_up = false;
+
+  if (wifi_joining) {
+    if ((uint32_t)(now - wifi_join_since_ms) < WIFI_JOIN_LIMIT_MS) return;
+    wifi_joining = false;
+    if (wifi_failures < 250) wifi_failures++;
+    const bool have_second = WIFI_SSID2[0] && strcmp(WIFI_SSID, WIFI_SSID2) != 0;
+    // Give the known network three complete attempts before trying its peer.
+    if (have_second && (wifi_failures % 3) == 0) wifi_network ^= 1;
+    wifi_next_try_ms = now + wifi_retry_delay(wifi_failures);
+    Serial.printf("# wifi keeper: join timed out; retry %u queued
+", (unsigned)wifi_failures);
+  }
+
+  if ((int32_t)(now - wifi_next_try_ms) < 0) return;
+  led_hold(LED_WIFI_JOINING, true);
+  const bool reset_radio = wifi_failures >= 6 &&
+    (wifi_last_radio_ms == 0 || (uint32_t)(now - wifi_last_radio_ms) >= WIFI_RADIO_RESET_MS);
+  wifi_keeper_start_join(now, reset_radio);
+}
 
 bool webcfg_updating() { return updating; }
 
@@ -78,20 +208,23 @@ static uint8_t arg_u8(const char *name, uint8_t fallback, uint8_t hi) {
 }
 
 static void handle_status() {
-  char body[780];
+  char body[1024];
   snprintf(body, sizeof body,
     "{\"firmware\":\"4square\",\"build_id\":\"%s\",\"api\":%d,\"ip\":\"%s\",\"ssid\":\"%s\","
-    "\"rssi\":%d,\"uptime_s\":%lu,\"temp_c10\":%d,\"humidity\":%u,"
+    "\"rssi\":%d,\"wifi_recoveries\":%lu,\"last_outage_s\":%lu,"
+    "\"uptime_s\":%lu,\"temp_c10\":%d,\"humidity\":%u,"
     "\"extras\":1,\"wide\":%d,\"linkedin\":{\"valid\":%s,\"followers\":%ld,\"gained7d\":%ld},"
     "\"hour24\":%u,\"temp_f\":%u,\"page\":%u,"
     "\"buttons\":[%u,%u,%u,%u],"
-    "\"leds\":{\"mode\":%u,\"bright\":%u},\"slots\":["
+    "\"leds\":{\"mode\":%u,\"bright\":%u},"
+    "\"secbar\":{\"thick\":%u,\"ticks\":%u},\"slots\":["
     "{\"widget\":%u,\"style\":%u,\"overlay\":%u},"
     "{\"widget\":%u,\"style\":%u,\"overlay\":%u},"
     "{\"widget\":%u,\"style\":%u,\"overlay\":%u},"
     "{\"widget\":%u,\"style\":%u,\"overlay\":%u}]}",
     FOURSQUARE_BUILD_ID, WEBCFG_API,
     WiFi.localIP().toString().c_str(), WiFi.SSID().c_str(), (int)WiFi.RSSI(),
+    (unsigned long)wifi_recoveries, (unsigned long)wifi_last_outage_s,
     (unsigned long)(millis() / 1000),
     ui_env.sht_ok ? (int)(ui_env.sht_c * 10.0f) : -9999,
     (unsigned)ui_env.rh,
@@ -102,6 +235,7 @@ static void handle_status() {
     (unsigned)btn_page_for(0), (unsigned)btn_page_for(1),
     (unsigned)btn_page_for(2), (unsigned)btn_page_for(3),
     (unsigned)cfg.led_mode, (unsigned)cfg.led_bright,
+    (unsigned)extras_secbar_thick(), (unsigned)extras_secbar_ticks(),
     (unsigned)cfg.slot_widget[0], (unsigned)cfg.slot_style[0], (unsigned)cfg.slot_overlay[0],
     (unsigned)cfg.slot_widget[1], (unsigned)cfg.slot_style[1], (unsigned)cfg.slot_overlay[1],
     (unsigned)cfg.slot_widget[2], (unsigned)cfg.slot_style[2], (unsigned)cfg.slot_overlay[2],
@@ -125,9 +259,12 @@ static void handle_layout() {
     cfg.slot_widget[i]  = arg_u8(names[0], cfg.slot_widget[i],
                                  (uint8_t)(X_FIRST + X_COUNT - 1));
     cfg.slot_style[i]   = arg_u8(names[1], cfg.slot_style[i],   0x7F);
-    // 4 is OV_LIWEEK (the weekly LinkedIn gain, bottom-left), 5 is the seconds
-    // bar and 6 the Wi-Fi bars; all live past the stock overlay enum.
-    cfg.slot_overlay[i] = arg_u8(names[2], cfg.slot_overlay[i], 6);
+    // 4 is OV_LIWEEK (the weekly LinkedIn gain), 5 the seconds bar, 6 the
+    // Wi-Fi bars and 7..9 sunrise/sunset; all live past the stock overlay
+    // enum. The byte holds two of them: low nibble along the bottom edge of
+    // the panel, high nibble along the top, so 0x51 is a seconds bar on top
+    // with digital seconds underneath.
+    cfg.slot_overlay[i] = arg_u8(names[2], cfg.slot_overlay[i], 0x99);
   }
   if (server.hasArg("hour24")) cfg.hour24    = arg_u8("hour24", cfg.hour24, 1);
   if (server.hasArg("tempf"))  cfg.temp_unit = arg_u8("tempf",  cfg.temp_unit, 1);
@@ -179,6 +316,20 @@ static void handle_layout() {
 //   wide=64..71    pin one
 //   followers=/gained=  push numbers in directly, instead of waiting for the
 //                       clock's own fifteen-minute fetch
+// How the seconds bar is drawn, for every panel that carries one:
+//   thick=1..4   the height of the bar in pixels
+//   ticks=0|1|2  no hash marks, marks at 15/30/45, or marks every ten seconds
+static void handle_secbar() {
+  const uint8_t thick = arg_u8("thick", extras_secbar_thick(), 4);
+  const uint8_t ticks = arg_u8("ticks", extras_secbar_ticks(), 2);
+  extras_set_secbar(thick == 0 ? 1 : thick, ticks);
+  ui_show_layout();
+  char body[96];
+  snprintf(body, sizeof body, "{\"ok\":true,\"thick\":%u,\"ticks\":%u}",
+           (unsigned)extras_secbar_thick(), (unsigned)extras_secbar_ticks());
+  send_json(200, body);
+}
+
 static void handle_extras() {
   if (server.hasArg("wide")) extras_set_wide((int)server.arg("wide").toInt());
   if (server.hasArg("followers"))
@@ -345,6 +496,7 @@ static void handle_update_data() {
     if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
       update_failed = true;
       Update.printError(Serial);
+      update_stand_down();
     }
   } else if (up.status == UPLOAD_FILE_WRITE) {
     if (!updating || update_failed) return;
@@ -396,14 +548,8 @@ void webcfg_begin() {
   started = true;
 
   WiFi.setSleep(false);          // never park the receiver
-  WiFi.setAutoReconnect(false);  // one reconnect owner: wifi_tick() only
+  WiFi.setAutoReconnect(false);  // one reconnect owner: connection keeper only
   WiFi.persistent(false);        // credentials are compiled in; avoid needless flash writes
-
-  if (MDNS.begin("foursquare-revo")) {
-    MDNS.addService("http", "tcp", 80);
-    MDNS.addServiceTxt("http", "tcp", "device", "4square");
-  }
-
 
   server.on("/api/status", HTTP_GET,  handle_status);
   server.on("/api/layout", HTTP_GET,  handle_layout);
@@ -414,6 +560,8 @@ void webcfg_begin() {
   server.on("/api/buttons", HTTP_POST, handle_buttons);
   server.on("/api/button", HTTP_GET,  handle_button);
   server.on("/api/button", HTTP_POST, handle_button);
+  server.on("/api/secbar", HTTP_GET,  handle_secbar);
+  server.on("/api/secbar", HTTP_POST, handle_secbar);
   server.on("/api/extras", HTTP_GET,  handle_extras);
   server.on("/api/extras", HTTP_POST, handle_extras);
   server.on("/api/restart", HTTP_POST, handle_restart);
@@ -442,6 +590,16 @@ static const char *const LINKEDIN_URL =
   "https://project--93f6b6d0-48fb-4dbe-87b6-455b65129623.lovable.app/api/public/linkedin";
 static uint32_t li_next_ms = 8000;   // first read shortly after the radio is up
 
+static bool wifi_ready_for_remote_read(uint32_t now) {
+  // Association alone is not enough: during a marginal join the status can
+  // briefly say CONNECTED before DHCP/DNS and the route are usable. Starting a
+  // synchronous DNS+TLS transaction in that window was the remaining route to
+  // a watchdog reset shortly after boot. Keep rendering cached data and wait
+  // for one uninterrupted minute of connectivity first.
+  return WiFi.status() == WL_CONNECTED && wifi_stable_since_ms != 0 &&
+         (uint32_t)(now - wifi_stable_since_ms) >= 60000u;
+}
+
 static long json_long(const String &body, const char *key, bool *found) {
   const int at = body.indexOf(key);
   *found = at >= 0;
@@ -451,19 +609,26 @@ static long json_long(const String &body, const char *key, bool *found) {
 
 static void linkedin_tick() {
   if (updating) return;
-  if (WiFi.status() != WL_CONNECTED) return;
   const uint32_t now = millis();
+  if (!wifi_ready_for_remote_read(now)) return;
   if ((int32_t)(now - li_next_ms) < 0) return;
   li_next_ms = now + 15u * 60u * 1000u;
 
   WiFiClientSecure tls;
   tls.setInsecure();
-  // The app has to ask a third party for the weekly figure, so this read is
-  // slower than the forecast. Six seconds was cutting it off every time.
-  tls.setTimeout(15);
+  // Keep the main loop available to the web server and Wi-Fi keeper. The app's
+  // endpoint has its own four-second fallback to cached data, so six seconds is
+  // enough without making a healthy clock appear offline for fifteen seconds.
+  tls.setTimeout(3);
   HTTPClient http;
   if (!http.begin(tls, LINKEDIN_URL)) return;
-  http.setTimeout(15000);
+  http.setReuse(false);
+  http.setConnectTimeout(3000);
+  http.setTimeout(3000);
+  // DNS, TLS, headers, and body reads are all synchronous in HTTPClient. Keep
+  // the loop watchdog out of this finite background transaction; otherwise a
+  // slow DNS/TLS exchange can reset the whole clock seconds after startup.
+  disableLoopWDT();
   const int code = http.GET();
   if (code == 200) {
     const String body = http.getString();
@@ -476,6 +641,7 @@ static void linkedin_tick() {
     li_next_ms = now + 60u * 1000u;
   }
   http.end();
+  enableLoopWDT();
 }
 
 // ---- the forecast ----------------------------------------------------------
@@ -489,17 +655,20 @@ static uint32_t wx_next_ms = 12000;
 
 static void weather_tick() {
   if (updating) return;
-  if (WiFi.status() != WL_CONNECTED) return;
   const uint32_t now = millis();
+  if (!wifi_ready_for_remote_read(now)) return;
   if ((int32_t)(now - wx_next_ms) < 0) return;
   wx_next_ms = now + 20u * 60u * 1000u;
 
   WiFiClientSecure tls;
   tls.setInsecure();
-  tls.setTimeout(6);
+  tls.setTimeout(3);
   HTTPClient http;
   if (!http.begin(tls, WEATHER_URL)) return;
-  http.setTimeout(6000);
+  http.setReuse(false);
+  http.setConnectTimeout(3000);
+  http.setTimeout(3000);
+  disableLoopWDT();
   const int code = http.GET();
   if (code == 200) {
     const String body = http.getString();
@@ -508,17 +677,23 @@ static void weather_tick() {
     const long cur  = json_long(body, "\"cur_c10\":", &b);
     const long mx   = json_long(body, "\"max_c10\":", &cc);
     const long pop  = json_long(body, "\"pop\":", &dd);
-    bool ee = false;
+    bool ee = false, ff = false, gg = false;
     const long mn   = json_long(body, "\"min_c10\":", &ee);
+    // Minutes past local midnight, so the sunrise/sunset corners need no
+    // date arithmetic on the clock at all.
+    const long sr   = json_long(body, "\"sunrise_min\":", &ff);
+    const long ss   = json_long(body, "\"sunset_min\":", &gg);
     if (a && b) {
       extras_set_weather((uint8_t)icon, (int16_t)cur,
                          (int16_t)(cc ? mx : cur), (int16_t)(ee ? mn : cur),
                          (uint8_t)(dd ? pop : 0));
     }
+    if (ff || gg) extras_set_sun((int16_t)(ff ? sr : -1), (int16_t)(gg ? ss : -1));
   } else {
     wx_next_ms = now + 60u * 1000u;
   }
   http.end();
+  enableLoopWDT();
 }
 
 void webcfg_tick() {
