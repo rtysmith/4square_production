@@ -36,7 +36,9 @@ enum XWidget : uint8_t {
   X_CLOCKHM,      // hour AND minute together, in one panel
   X_DATELINE,     // weekday, day and month together, in one panel
   X_WEATHER,      // outside: icon, now, today's high, chance of rain
+  X_CREDITS,      // software version + who built it
   X_LAST
+
 };
 
 static const uint8_t X_FIRST = (uint8_t)X_FEELS;
@@ -44,6 +46,17 @@ static const uint8_t X_COUNT = (uint8_t)(X_LAST - X_FEELS);
 
 bool extras_is_widget(uint8_t w);
 const char *extras_widget_name(uint8_t w);
+
+// ---- the boot screen -------------------------------------------------------
+// For the first few seconds after power-up every panel shows the same card:
+// the name, the software version this image was built as, and who built it.
+// It is drawn from face_render() so it covers all four panels no matter what
+// layout is saved, and it costs nothing once the timer has run out.
+bool extras_splash_active();
+void extras_splash_draw(GFXcanvas1 &c);
+/** The version string the image was stamped with, e.g. "v15.7". */
+const char *extras_fw_version();
+
 // ov is the corner overlay the editor saved for this panel (OV_NONE/SECONDS/
 // AMPM/TEMP/LINKEDIN WEEK). The derived screens draw it themselves —
 // face_render returns early for them, so without this a corner setting would
