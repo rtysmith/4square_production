@@ -547,7 +547,15 @@ void extras_face_render(GFXcanvas1 &c, uint8_t w, uint8_t ov, const FaceData &d)
       if (!li_valid) { x_pair(c, "LINKEDIN", "--", 4); break; }
       if (li_followers >= 10000) snprintf(b, sizeof b, "%ld.%ldk", (long)(li_followers / 1000), (long)((li_followers % 1000) / 100));
       else snprintf(b, sizeof b, "%ld", (long)li_followers);
-      x_pair(c, "FOLLOWERS", b, 4);
+      // Leave a dedicated bottom row when the +7-day corner is selected.
+      // A size-4 value starting at y+16 reaches the overlay baseline; lifting
+      // it six pixels keeps the total and weekly gain visually separate.
+      if (ov == 4) {
+        x_center(c, "FOLLOWERS", 1, (int16_t)(SAFE_Y0));
+        x_center(c, b, 4, (int16_t)(SAFE_Y0 + 10));
+      } else {
+        x_pair(c, "FOLLOWERS", b, 4);
+      }
       break;
     }
     case X_LIWEEK: {
