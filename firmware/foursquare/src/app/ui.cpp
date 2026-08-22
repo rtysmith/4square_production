@@ -719,7 +719,8 @@ static uint8_t clock_sec_mask() {
   if (variant[PG_CLOCK] != 0) return CLOCK_SEC_MASK;
   uint8_t m = 0;
   for (uint8_t i = 0; i < 4; i++)
-    if (cfg.slot_overlay[i] == 1 || cfg.slot_overlay[i] == 5)
+    if ((cfg.slot_overlay[i] & 0x0F) == 1 || (cfg.slot_overlay[i] & 0x0F) == 5 ||
+        ((cfg.slot_overlay[i] >> 4) & 0x0F) == 1 || ((cfg.slot_overlay[i] >> 4) & 0x0F) == 5)
       m |= (uint8_t)(1 << i);
   return m;
 }
