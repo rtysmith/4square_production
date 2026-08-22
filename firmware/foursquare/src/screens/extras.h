@@ -52,6 +52,9 @@ void extras_face_render(GFXcanvas1 &c, uint8_t w, uint8_t ov, const FaceData &d)
 // The weekly LinkedIn gain, drawn small in the bottom-left corner. Shared with
 // faces.cpp so a normal (non-derived) panel can carry the same corner.
 void extras_overlay_week(GFXcanvas1 &c);
+// The seconds as a filling bar along the bottom edge instead of a ":07" count.
+// Shared with faces.cpp so an ordinary panel can carry it too.
+void extras_overlay_secbar(GFXcanvas1 &c, int seconds);
 
 
 // ---- animations that cross the bezel ---------------------------------------
@@ -97,7 +100,8 @@ int32_t extras_linkedin_gained();
 // finished numbers. Temperatures are tenths of a degree Celsius, pop is a
 // whole percent, icon is 0..7 (clear, partly, cloud, fog, drizzle, rain, snow,
 // storm).
-void extras_set_weather(uint8_t icon, int16_t cur_c10, int16_t max_c10, uint8_t pop);
+void extras_set_weather(uint8_t icon, int16_t cur_c10, int16_t max_c10,
+                        int16_t min_c10, uint8_t pop);
 bool extras_weather_valid();
 
 // ---- what the four buttons on the back do ----------------------------------
