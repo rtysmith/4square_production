@@ -9,20 +9,6 @@
 #include <string.h>
 #include <Preferences.h>
 
-// Stamped by the app on every build. A fork that has never been built by the
-// Control Center still compiles; it just reports itself as a development image.
-#if __has_include("../fw_version.h")
-#include "../fw_version.h"
-#endif
-#ifndef FOURSQUARE_FW_VERSION
-#define FOURSQUARE_FW_VERSION "v0.dev"
-#endif
-#ifndef FOURSQUARE_BUILT_BY
-#define FOURSQUARE_BUILT_BY "SWYR.com"
-#endif
-
-
-
 // ===========================================================================
 // small drawing helpers, all clipped to the anti-burn-in safe area
 // ===========================================================================
@@ -41,103 +27,6 @@ static void x_center(GFXcanvas1 &c, const char *s, uint8_t size, int16_t y) {
   x_text(c, s, size, y, x);
 }
 
-static void x_bar(GFXcanvas1 &c, int16_t y, int16_t h, uint8_t pct) {
-  if (pct > 100) pct = 100;
-  c.drawRect(SAFE_X0, y, SAFE_W, h, 1);
-  const int16_t w = (int16_t)((int32_t)(SAFE_W - 4) * pct / 100);
-  if (w > 0) c.fillRect((int16_t)(SAFE_X0 + 2), (int16_t)(y + 2), w,
-                        (int16_t)(h - 4), 1);
-}
-
-// ---- the boot screen -------------------------------------------------------
-
-// It holds until the clock is actually on the network, because that is the one
-// thing you cannot tell by looking at a clock face. While it waits it shows the
-// version, the recovery step it is on, why the last attempt failed, and how
-// long it has been trying. Once the link is up it says READY for a beat and
-// gets out of the way on its own.
-//
-// The ten minute cap is a safety valve, not a feature: after that the saved
-// layout takes over anyway (the Wi-Fi panel keeps reporting) so a clock on a
-// dead network still tells the time.
-static const uint32_t SPLASH_MIN_MS   = 2500u;
-static const uint32_t SPLASH_READY_MS = 1500u;
-static const uint32_t SPLASH_CAP_MS   = 600000u;
-static uint32_t splash_ready_at = 0;
-static bool     splash_done = false;
-
-const char *extras_fw_version() { return FOURSQUARE_FW_VERSION; }
-
-bool extras_splash_active() {
-  if (splash_done) return false;
-  const uint32_t now = millis();
-  if (now >= SPLASH_CAP_MS) { splash_done = true; return false; }
-  if (ui_env.wifi_up) {
-    if (splash_ready_at == 0) splash_ready_at = now;
-    if (now - splash_ready_at >= SPLASH_READY_MS && now >= SPLASH_MIN_MS) {
-      splash_done = true;
-      return false;
-    }
-  } else {
-    splash_ready_at = 0;
-  }
-  return true;
-}
-
-void extras_splash_draw(GFXcanvas1 &c) {
-  char b[24];
-  c.fillScreen(0);
-  c.setFont(nullptr);
-  c.setTextWrap(false);
-
-  const uint32_t now = millis();
-  const uint32_t secs = now / 1000u;
-
-  x_center(c, "4SQUARE", 2, (int16_t)(SAFE_Y0 + 1));
-  snprintf(b, sizeof b, "%s  SWYR.com", FOURSQUARE_FW_VERSION);
-  x_center(c, b, 1, (int16_t)(SAFE_Y0 + 18));
-
-  if (ui_env.wifi_up) {
-    x_center(c, "WIFI READY", 1, (int16_t)(SAFE_Y0 + 30));
-    x_center(c, ui_env.ip, 1, (int16_t)(SAFE_Y0 + 40));
-    x_bar(c, (int16_t)(SAFE_Y0 + 50), 7, 100);
-    return;
-  }
-
-  const uint8_t stage = webcfg_wifi_stage();
-  const char *label = "STARTING RADIO";
-  if (stage == 1)      label = "CHECKING SIGNAL";
-  else if (stage == 2) label = "JOINING NETWORK";
-  else if (stage == 3) label = "REQUESTING IP";
-  else if (stage == 4) label = "WAITING TO RETRY";
-  else if (stage == 5) label = "RESETTING RADIO";
-
-  const uint8_t failure = webcfg_wifi_failure();
-  const char *failed = 0;
-  if (failure == 1)      failed = "NO SUCH NETWORK";
-  else if (failure == 2) failed = "PASSWORD REFUSED";
-  else if (failure == 3) failed = "JOIN TIMED OUT";
-  else if (failure == 4) failed = "NO IP ADDRESS";
-  else if (failure == 5) failed = "RADIO STUCK";
-
-  x_center(c, label, 1, (int16_t)(SAFE_Y0 + 30));
-  if (failed) {
-    snprintf(b, sizeof b, "LAST: %s", failed);
-    x_center(c, b, 1, (int16_t)(SAFE_Y0 + 40));
-  } else {
-    x_center(c, "NO FAILURES YET", 1, (int16_t)(SAFE_Y0 + 40));
-  }
-
-  x_bar(c, (int16_t)(SAFE_Y0 + 48), 6, webcfg_wifi_progress());
-  snprintf(b, sizeof b, "%lu:%02lu NET %u TRY %u",
-           (unsigned long)(secs / 60u), (unsigned long)(secs % 60u),
-           (unsigned)webcfg_wifi_network(), (unsigned)webcfg_wifi_attempt());
-  x_center(c, b, 1, (int16_t)(SAFE_Y0 + 56));
-}
-
-
-
-
 // A caption over a big value: the shape every derived screen uses, so they
 // all read as one family rather than nineteen one-offs.
 static void x_pair(GFXcanvas1 &c, const char *cap, const char *val,
@@ -146,8 +35,13 @@ static void x_pair(GFXcanvas1 &c, const char *cap, const char *val,
   x_center(c, val, val_size, (int16_t)(SAFE_Y0 + 16));
 }
 
-
-
+static void x_bar(GFXcanvas1 &c, int16_t y, int16_t h, uint8_t pct) {
+  if (pct > 100) pct = 100;
+  c.drawRect(SAFE_X0, y, SAFE_W, h, 1);
+  const int16_t w = (int16_t)((int32_t)(SAFE_W - 4) * pct / 100);
+  if (w > 0) c.fillRect((int16_t)(SAFE_X0 + 2), (int16_t)(y + 2), w,
+                        (int16_t)(h - 4), 1);
+}
 
 // ===========================================================================
 // the rolling history — one sample a minute, an hour deep, plus today's range
@@ -408,9 +302,7 @@ bool extras_is_widget(uint8_t w) { return w >= X_FIRST && w < (uint8_t)X_LAST; }
 static const char *const X_NAMES[] = {
   "FEELS", "DEW PT", "ABS RH", "COMFORT", "T TREND", "HI/LO", "RH TREND",
   "DAY NO", "WEEK", "DAYS LEFT", "QUARTER", "MOON", "SEASON", "WIFI",
-  "UPTIME", "LIGHT", "IP", "FOLLOWERS", "7 DAYS", "CLOCK", "DATE", "WEATHER",
-  "ABOUT"
-
+  "UPTIME", "LIGHT", "IP", "FOLLOWERS", "7 DAYS", "CLOCK", "DATE", "WEATHER"
 };
 
 
@@ -1017,18 +909,8 @@ void extras_face_render(GFXcanvas1 &c, uint8_t w, uint8_t ov, const FaceData &d)
       break;
     }
 
-    // Who made it, and which image is running. The same card the clock shows
-    // for the first four seconds after power-up, available permanently.
-    case X_CREDITS: {
-      x_center(c, "4SQUARE", 2, (int16_t)(SAFE_Y0 + 4));
-      x_center(c, extras_fw_version(), 2, (int16_t)(SAFE_Y0 + 24));
-      x_center(c, "BUILT BY", 1, (int16_t)(SAFE_Y0 + 44));
-      x_center(c, FOURSQUARE_BUILT_BY, 1, (int16_t)(SAFE_Y0 + 54));
-      break;
-    }
 
     default:
-
       x_pair(c, "EXTRA", "?", 3);
       break;
   }
