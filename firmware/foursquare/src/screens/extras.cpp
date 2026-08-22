@@ -61,8 +61,9 @@ static void x_bar(GFXcanvas1 &c, int16_t y, int16_t h, uint8_t pct) {
 // layout takes over anyway (the Wi-Fi panel keeps reporting) so a clock on a
 // dead network still tells the time.
 static const uint32_t SPLASH_MIN_MS   = 2500u;
-static const uint32_t SPLASH_READY_MS = 1500u;
-static const uint32_t SPLASH_CAP_MS   = 600000u;
+// Once an IP arrives, show the "we are live" boot cards for a full ten seconds
+// so the address and mDNS name can actually be read off the clock.
+static const uint32_t SPLASH_READY_MS = 10000u;
 static uint32_t splash_ready_at = 0;
 static bool     splash_done = false;
 
@@ -71,8 +72,13 @@ const char *extras_fw_version() { return FOURSQUARE_FW_VERSION; }
 bool extras_splash_active() {
   if (splash_done) return false;
   const uint32_t now = millis();
-  if (now >= SPLASH_CAP_MS) { splash_done = true; return false; }
-  if (ui_env.wifi_up) {
+  // NO TIME CAP: the boot screen is the only place the recovery steps are
+  // visible, so it stays up until the clock really has an address.
+  // ASSOCIATED IS NOT ONLINE: hold the splash until there is an actual IP
+
+  // address, not merely a link. webcfg_wifi_online() is the only flag that
+  // means "other machines can reach this clock".
+  if (webcfg_wifi_online()) {
     if (splash_ready_at == 0) splash_ready_at = now;
     if (now - splash_ready_at >= SPLASH_READY_MS && now >= SPLASH_MIN_MS) {
       splash_done = true;
@@ -109,6 +115,7 @@ static const char *splash_stage_label(uint8_t stage) {
   if (stage == 2) return "JOINING";
   if (stage == 3) return "ASKING FOR IP";
   if (stage == 4) return "WAITING TO RETRY";
+  if (stage == 6) return "SCANNING FOR WIFI";
   return "RESETTING RADIO";
 }
 
@@ -143,6 +150,7 @@ void extras_splash_draw(GFXcanvas1 &c) {
   const uint32_t secs = now / 1000u;
   const uint8_t  slot = splash_next_slot();
   const uint8_t  stage = webcfg_wifi_stage();
+  const bool     online = webcfg_wifi_online();
   const char    *failed = splash_fail_label(webcfg_wifi_failure());
 
   switch (slot) {
@@ -163,7 +171,7 @@ void extras_splash_draw(GFXcanvas1 &c) {
       x_center(c, b, 1, (int16_t)(SAFE_Y0 + 30));
       snprintf(b, sizeof b, "ATTEMPT %u", (unsigned)webcfg_wifi_attempt());
       x_center(c, b, 1, (int16_t)(SAFE_Y0 + 42));
-      if (ui_env.wifi_up) {
+      if (online) {
         snprintf(b, sizeof b, "SIGNAL %d dBm", (int)ui_env.rssi);
         x_center(c, b, 1, (int16_t)(SAFE_Y0 + 54));
       }
@@ -173,11 +181,11 @@ void extras_splash_draw(GFXcanvas1 &c) {
     // ---- bottom left: what it is doing right now ---------------------------
     case 2:
       x_center(c, "STEP", 1, (int16_t)(SAFE_Y0 + 2));
-      x_center(c, splash_stage_label(ui_env.wifi_up ? 0 : stage), 1,
+      x_center(c, splash_stage_label(online ? 0 : stage), 1,
                (int16_t)(SAFE_Y0 + 16));
       x_bar(c, (int16_t)(SAFE_Y0 + 28), 8,
-            ui_env.wifi_up ? 100 : webcfg_wifi_progress());
-      snprintf(b, sizeof b, "%u OF 5", (unsigned)(ui_env.wifi_up ? 5 : stage));
+            online ? 100 : webcfg_wifi_progress());
+      snprintf(b, sizeof b, "%u OF 5", (unsigned)(online ? 5 : (stage > 5 ? 1 : stage)));
       x_center(c, b, 1, (int16_t)(SAFE_Y0 + 42));
       snprintf(b, sizeof b, "UP %lu:%02lu",
                (unsigned long)(secs / 60u), (unsigned long)(secs % 60u));
@@ -186,7 +194,7 @@ void extras_splash_draw(GFXcanvas1 &c) {
 
     // ---- bottom right: the result, good or bad -----------------------------
     default:
-      if (ui_env.wifi_up) {
+      if (online) {
         x_center(c, "READY", 1, (int16_t)(SAFE_Y0 + 2));
         x_center(c, ui_env.ip, 1, (int16_t)(SAFE_Y0 + 16));
         x_center(c, "foursquare-", 1, (int16_t)(SAFE_Y0 + 30));
@@ -195,8 +203,10 @@ void extras_splash_draw(GFXcanvas1 &c) {
       } else {
         x_center(c, "LAST PROBLEM", 1, (int16_t)(SAFE_Y0 + 2));
         x_center(c, failed ? failed : "NONE YET", 1, (int16_t)(SAFE_Y0 + 16));
-        x_center(c, "WAITING FOR", 1, (int16_t)(SAFE_Y0 + 32));
-        x_center(c, "WIFI TO COME UP", 1, (int16_t)(SAFE_Y0 + 42));
+        x_center(c, stage == 3 ? "WAITING ON THE" : "WAITING FOR", 1,
+                 (int16_t)(SAFE_Y0 + 32));
+        x_center(c, stage == 3 ? "ROUTER FOR AN IP" : "WIFI TO COME UP", 1,
+                 (int16_t)(SAFE_Y0 + 42));
         snprintf(b, sizeof b, "TRY %u  AP %u", (unsigned)webcfg_wifi_attempt(),
                  (unsigned)webcfg_wifi_network());
         x_center(c, b, 1, (int16_t)(SAFE_Y0 + 54));
@@ -520,6 +530,7 @@ static void draw_wifi(GFXcanvas1 &c) {
     else if (stage == 2) label = "JOINING NETWORK";
     else if (stage == 3) label = "REQUESTING IP";
     else if (stage == 4) label = "WAITING TO RETRY";
+    else if (stage == 6) label = "SCANNING NETWORKS";
     const char *failed = "NO FAILURE YET";
     if (failure == 1) failed = "FAILED: NOT FOUND";
     else if (failure == 2) failed = "FAILED: PASSWORD";
