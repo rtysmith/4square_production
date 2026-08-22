@@ -346,20 +346,24 @@ static void x_overlay(GFXcanvas1 &c, uint8_t ov, const FaceData &d) {
 }
 
 // ---- the weather icon ------------------------------------------------------
-// Drawn, not written: eight little scenes in a 34x30 box, each built from
-// circles, lines and a cloud made of three overlapping discs.
-static void wx_cloud(GFXcanvas1 &c, int16_t x, int16_t y, bool filled) {
-  if (filled) {
-    c.fillCircle((int16_t)(x + 8), (int16_t)(y + 8), 7, 1);
-    c.fillCircle((int16_t)(x + 18), (int16_t)(y + 6), 9, 1);
-    c.fillCircle((int16_t)(x + 26), (int16_t)(y + 9), 6, 1);
-    c.fillRect(x, (int16_t)(y + 8), 28, 8, 1);
-  } else {
-    c.drawCircle((int16_t)(x + 8), (int16_t)(y + 8), 7, 1);
-    c.drawCircle((int16_t)(x + 18), (int16_t)(y + 6), 9, 1);
-    c.drawCircle((int16_t)(x + 26), (int16_t)(y + 9), 6, 1);
-    c.drawFastHLine(x, (int16_t)(y + 16), 28, 1);
-  }
+// Eight little scenes drawn inside a 32x30 box.
+//
+// WHY THE CLOUDS ARE SOLID: an outline cloud on a 128x64 mono OLED is three
+// overlapping circle arcs, and at this size the leftover internal arcs read as
+// noise. A filled silhouette is unmistakable at a glance from across a desk,
+// which is the whole job. Where something sits BEHIND the cloud (the sun in
+// "partly"), the cloud is punched out of it first with a one-pixel gap, so the
+// two shapes stay separate instead of merging into a blob.
+static void wx_cloud_shape(GFXcanvas1 &c, int16_t x, int16_t y, int16_t grow, uint16_t col) {
+  c.fillCircle((int16_t)(x + 8), (int16_t)(y + 8), (int16_t)(6 + grow), col);
+  c.fillCircle((int16_t)(x + 17), (int16_t)(y + 6), (int16_t)(8 + grow), col);
+  c.fillCircle((int16_t)(x + 24), (int16_t)(y + 9), (int16_t)(5 + grow), col);
+  c.fillRect((int16_t)(x - grow), (int16_t)(y + 8 - grow),
+             (int16_t)(26 + 2 * grow), (int16_t)(7 + 2 * grow), col);
+}
+
+static void wx_cloud(GFXcanvas1 &c, int16_t x, int16_t y) {
+  wx_cloud_shape(c, x, y, 0, 1);
 }
 
 static void wx_sun(GFXcanvas1 &c, int16_t cx, int16_t cy, int16_t r, bool rays) {
@@ -367,56 +371,70 @@ static void wx_sun(GFXcanvas1 &c, int16_t cx, int16_t cy, int16_t r, bool rays) 
   if (!rays) return;
   for (uint8_t i = 0; i < 8; i++) {
     const float a = (float)i * 3.14159265f / 4.0f;
-    const int16_t x0 = (int16_t)(cx + cosf(a) * (r + 3));
-    const int16_t y0 = (int16_t)(cy + sinf(a) * (r + 3));
-    const int16_t x1 = (int16_t)(cx + cosf(a) * (r + 6));
-    const int16_t y1 = (int16_t)(cy + sinf(a) * (r + 6));
+    const int16_t x0 = (int16_t)(cx + cosf(a) * (r + 2));
+    const int16_t y0 = (int16_t)(cy + sinf(a) * (r + 2));
+    const int16_t x1 = (int16_t)(cx + cosf(a) * (r + 5));
+    const int16_t y1 = (int16_t)(cy + sinf(a) * (r + 5));
     c.drawLine(x0, y0, x1, y1, 1);
   }
+}
+
+/** A slanted raindrop streak. */
+static void wx_drop(GFXcanvas1 &c, int16_t x, int16_t y, int16_t len) {
+  c.drawLine(x, y, (int16_t)(x - 2), (int16_t)(y + len), 1);
+}
+
+/** A six-point flake: three crossing strokes. */
+static void wx_flake(GFXcanvas1 &c, int16_t cx, int16_t cy, int16_t r) {
+  c.drawFastHLine((int16_t)(cx - r), cy, (int16_t)(2 * r + 1), 1);
+  c.drawLine((int16_t)(cx - r), (int16_t)(cy - r), (int16_t)(cx + r), (int16_t)(cy + r), 1);
+  c.drawLine((int16_t)(cx - r), (int16_t)(cy + r), (int16_t)(cx + r), (int16_t)(cy - r), 1);
 }
 
 static void wx_icon_draw(GFXcanvas1 &c, uint8_t icon, int16_t x, int16_t y) {
   switch (icon) {
     case 0:                                    // clear
-      wx_sun(c, (int16_t)(x + 15), (int16_t)(y + 14), 7, true);
+      wx_sun(c, (int16_t)(x + 15), (int16_t)(y + 15), 8, true);
       break;
     case 1:                                    // partly cloudy
-      wx_sun(c, (int16_t)(x + 8), (int16_t)(y + 6), 5, true);
-      wx_cloud(c, (int16_t)(x + 2), (int16_t)(y + 8), false);
+      wx_sun(c, (int16_t)(x + 21), (int16_t)(y + 6), 6, true);
+      wx_cloud_shape(c, (int16_t)(x + 1), (int16_t)(y + 11), 2, 0);   // gap
+      wx_cloud(c, (int16_t)(x + 1), (int16_t)(y + 11));
       break;
     case 2:                                    // cloudy
-      wx_cloud(c, (int16_t)(x + 1), (int16_t)(y + 5), false);
+      wx_sun(c, (int16_t)(x + 22), (int16_t)(y + 5), 4, false);
+      wx_cloud_shape(c, (int16_t)(x + 1), (int16_t)(y + 8), 2, 0);
+      wx_cloud(c, (int16_t)(x + 1), (int16_t)(y + 8));
       break;
     case 3:                                    // fog
-      wx_cloud(c, (int16_t)(x + 1), (int16_t)(y + 1), false);
+      wx_cloud(c, (int16_t)(x + 2), (int16_t)(y + 1));
       for (uint8_t i = 0; i < 3; i++)
-        c.drawFastHLine((int16_t)(x + 2 + (i & 1) * 4), (int16_t)(y + 20 + i * 4), 24, 1);
+        c.drawFastHLine((int16_t)(x + 1 + (i & 1) * 5), (int16_t)(y + 19 + i * 4), 22, 1);
       break;
     case 4:                                    // drizzle
-    case 5: {                                  // rain
-      wx_cloud(c, (int16_t)(x + 1), (int16_t)(y + 1), icon == 5);
-      const uint8_t drops = icon == 5 ? 4 : 3;
-      for (uint8_t i = 0; i < drops; i++) {
-        const int16_t dx = (int16_t)(x + 5 + i * 7);
-        c.drawLine(dx, (int16_t)(y + 20), (int16_t)(dx - 2), (int16_t)(y + 27), 1);
-      }
+      wx_cloud(c, (int16_t)(x + 2), (int16_t)(y + 1));
+      for (uint8_t i = 0; i < 3; i++)
+        wx_drop(c, (int16_t)(x + 8 + i * 7), (int16_t)(y + 19), 4);
+      break;
+    case 5:                                    // rain
+      wx_cloud(c, (int16_t)(x + 2), (int16_t)(y + 1));
+      for (uint8_t i = 0; i < 4; i++)
+        wx_drop(c, (int16_t)(x + 5 + i * 6), (int16_t)(y + 19), 8);
+      break;
+    case 6:                                    // snow
+      wx_cloud(c, (int16_t)(x + 2), (int16_t)(y + 1));
+      for (uint8_t i = 0; i < 3; i++)
+        wx_flake(c, (int16_t)(x + 7 + i * 8), (int16_t)(y + 24), 3);
+      break;
+    default: {                                 // storm
+      wx_cloud(c, (int16_t)(x + 2), (int16_t)(y + 1));
+      // A solid bolt: two triangles, so it survives the pixel shifter.
+      c.fillTriangle((int16_t)(x + 17), (int16_t)(y + 18), (int16_t)(x + 9), (int16_t)(y + 26),
+                     (int16_t)(x + 16), (int16_t)(y + 26), 1);
+      c.fillTriangle((int16_t)(x + 18), (int16_t)(y + 24), (int16_t)(x + 11), (int16_t)(y + 31),
+                     (int16_t)(x + 15), (int16_t)(y + 24), 1);
       break;
     }
-    case 6:                                    // snow
-      wx_cloud(c, (int16_t)(x + 1), (int16_t)(y + 1), false);
-      for (uint8_t i = 0; i < 3; i++) {
-        const int16_t sx = (int16_t)(x + 7 + i * 9);
-        const int16_t sy = (int16_t)(y + 24);
-        c.drawFastHLine((int16_t)(sx - 3), sy, 7, 1);
-        c.drawFastVLine(sx, (int16_t)(sy - 3), 7, 1);
-      }
-      break;
-    default:                                   // storm
-      wx_cloud(c, (int16_t)(x + 1), (int16_t)(y + 1), true);
-      c.drawLine((int16_t)(x + 16), (int16_t)(y + 19), (int16_t)(x + 11), (int16_t)(y + 25), 1);
-      c.drawLine((int16_t)(x + 11), (int16_t)(y + 25), (int16_t)(x + 17), (int16_t)(y + 25), 1);
-      c.drawLine((int16_t)(x + 17), (int16_t)(y + 25), (int16_t)(x + 11), (int16_t)(y + 31), 1);
-      break;
   }
 }
 
@@ -570,11 +588,13 @@ void extras_face_render(GFXcanvas1 &c, uint8_t w, uint8_t ov, const FaceData &d)
       if (li_followers >= 10000) snprintf(b, sizeof b, "%ld.%ldk", (long)(li_followers / 1000), (long)((li_followers % 1000) / 100));
       else snprintf(b, sizeof b, "%ld", (long)li_followers);
       if (!li_valid) snprintf(b, sizeof b, "--");
-      // Leave a clear bottom row when a corner is selected: a size-3 value
-      // pinned high cannot reach the overlay baseline.
+      // With a corner in play the pair is centred in the space ABOVE the
+      // overlay row rather than jammed against the top edge: pinning it high
+      // left the number floating with a hole under it, which is the thing that
+      // looked broken.
       if (ov != 0) {
-        x_center(c, "LINKEDIN", 1, (int16_t)(SAFE_Y0));
-        x_center(c, b, 3, (int16_t)(SAFE_Y0 + 10));
+        x_center(c, "LINKEDIN", 1, (int16_t)(SAFE_Y0 + 3));
+        x_center(c, b, 3, (int16_t)(SAFE_Y0 + 17));
       } else {
         x_pair(c, "LINKEDIN", b, 4);
       }
@@ -596,12 +616,12 @@ void extras_face_render(GFXcanvas1 &c, uint8_t w, uint8_t ov, const FaceData &d)
       snprintf(b, sizeof b, "%u:%02u", (unsigned)hh, (unsigned)d.minute);
       x_center(c, b, 3, (int16_t)(SAFE_Y0 + 12));
       // The AM/PM corner already says it: don't print a second one right
-      // beside it. Otherwise it sits under the time, clear of the corners.
-      // When the seconds bar runs along the bottom, lift AM/PM so the two
-      // don't touch.
+      // beside it. Otherwise it sits under the time. Keep the full-panel
+      // label on the same baseline even when the seconds bar is selected —
+      // lifting it made AM/PM crowd the clock digits instead of reading as the
+      // lower line of the clock.
       if (!d.hour24 && ov != 2) {
         int16_t y = (int16_t)(SAFE_Y0 + 38);
-        if (ov == 5) y = (int16_t)(SAFE_Y0 + 34);
         x_center(c, d.hour < 12 ? "AM" : "PM", 1, y);
       }
       break;
@@ -625,10 +645,12 @@ void extras_face_render(GFXcanvas1 &c, uint8_t w, uint8_t ov, const FaceData &d)
     }
 
     // ---- outside ------------------------------------------------------------
-    // The whole forecast, using the whole panel: the condition in words across
-    // the top, the sky drawn on the left, the temperature now in the middle,
-    // today's high and low stacked on the right, and the chance of rain as a
-    // labelled bar along the bottom edge.
+    // The whole forecast in one panel: the condition in words across the top,
+    // the sky drawn on the left, the temperature now filling the middle, the
+    // day's high over low on the right, and the chance of rain as one plain
+    // rule along the bottom. No degree marks — on a panel this size the little
+    // circle costs a whole character of width and tells you nothing you did
+    // not already know from a screen labelled WEATHER.
     case X_WEATHER: {
       if (!wx_valid) { x_pair(c, "WEATHER", "--", 4); break; }
       static const char *const WXN[8] = { "CLEAR", "PARTLY", "CLOUDY", "FOG",
@@ -642,43 +664,52 @@ void extras_face_render(GFXcanvas1 &c, uint8_t w, uint8_t ov, const FaceData &d)
       const int min_t = (int)lroundf(d.temp_f ? min_c * 9.0f / 5.0f + 32.0f : min_c);
 
       // Condition across the top, centred, with a rule under it.
-      x_center(c, WXN[wx_icon & 7], 1, (int16_t)(SAFE_Y0));
+      x_center(c, WXN[wx_icon & 7], 1, SAFE_Y0);
       c.drawFastHLine(SAFE_X0, (int16_t)(SAFE_Y0 + 9), SAFE_W, 1);
 
-      // The sky, drawn, hard left.
-      wx_icon_draw(c, wx_icon, SAFE_X0, (int16_t)(SAFE_Y0 + 12));
+      // The three columns of the middle band: sky, now, high/low. The right
+      // column is measured from the widest of H/L rather than guessed, so a
+      // three-digit reading cannot push the big number off its own panel.
+      const int16_t band = (int16_t)(SAFE_Y0 + 11);
+      char hi[8], lo[8];
+      snprintf(hi, sizeof hi, "H%d", max_t);
+      snprintf(lo, sizeof lo, "L%d", min_t);
+      const size_t rchars = strlen(hi) > strlen(lo) ? strlen(hi) : strlen(lo);
+      const int16_t rw = (int16_t)(rchars * 6 - 1);
+      const int16_t rx = (int16_t)(SAFE_X0 + SAFE_W - rw);
 
-      // Now, as big as the panel allows, in the middle band.
-      snprintf(b, sizeof b, "%d%c", now_t, (char)0xF8);
+      wx_icon_draw(c, wx_icon, SAFE_X0, band);
+
+      snprintf(b, sizeof b, "%d", now_t);
       {
-        const int16_t w = (int16_t)(strlen(b) * 18 - 3);
-        int16_t x = (int16_t)(SAFE_X0 + 36);
-        if (x + w > SAFE_X0 + SAFE_W - 30) x = (int16_t)(SAFE_X0 + SAFE_W - 30 - w);
-        if (x < SAFE_X0 + 34) x = (int16_t)(SAFE_X0 + 34);
-        x_text(c, b, 3, (int16_t)(SAFE_Y0 + 16), x);
+        // Size 3 if it fits between the icon and the high/low column, size 2
+        // if it does not. Nothing gets clipped and nothing is needlessly small.
+        const int16_t left = (int16_t)(SAFE_X0 + 33);
+        const int16_t room = (int16_t)(rx - 3 - left);
+        const int16_t w3 = (int16_t)(strlen(b) * 18 - 3);
+        const uint8_t size = w3 <= room ? 3 : 2;
+        const int16_t w = (int16_t)(strlen(b) * 6 * size - (size - 1));
+        const int16_t x = (int16_t)(left + (room - w) / 2);
+        x_text(c, b, size, (int16_t)(band + (size == 3 ? 5 : 8)), x < left ? left : x);
       }
 
-      // Today's high over today's low, right-hand column.
-      {
-        const int16_t rx = (int16_t)(SAFE_X0 + SAFE_W - 30);
-        snprintf(b, sizeof b, "H%d%c", max_t, (char)0xF8);
-        x_text(c, b, 1, (int16_t)(SAFE_Y0 + 16), rx);
-        snprintf(b, sizeof b, "L%d%c", min_t, (char)0xF8);
-        x_text(c, b, 1, (int16_t)(SAFE_Y0 + 28), rx);
-      }
+      x_text(c, hi, 1, (int16_t)(band + 4), rx);
+      x_text(c, lo, 1, (int16_t)(band + 16), rx);
 
-      // Chance of rain: the words on the left of the bottom row, the bar
-      // filling whatever is left of it.
+      // Chance of rain: one line, not a box. The label sits on the left of the
+      // bottom row and the rule to its right fills left-to-right with the
+      // percentage — a single 2px stroke, so it reads as an underline rather
+      // than another container competing with the panel border.
       {
-        const int16_t by = (int16_t)(SAFE_Y0 + SAFE_H - 9);
+        const int16_t ly = (int16_t)(SAFE_Y0 + SAFE_H - 7);
         snprintf(b, sizeof b, "RAIN %u%%", (unsigned)wx_pop);
-        x_text(c, b, 1, (int16_t)(by + 1), SAFE_X0);
-        const int16_t bx = (int16_t)(SAFE_X0 + 50);
-        const int16_t bw = (int16_t)(SAFE_X0 + SAFE_W - bx);
-        if (bw > 8) {
-          c.drawRect(bx, by, bw, 8, 1);
-          const int16_t fw = (int16_t)((int32_t)(bw - 4) * wx_pop / 100);
-          if (fw > 0) c.fillRect((int16_t)(bx + 2), (int16_t)(by + 2), fw, 4, 1);
+        x_text(c, b, 1, (int16_t)(ly - 1), SAFE_X0);
+        const int16_t lx = (int16_t)(SAFE_X0 + (int16_t)(strlen(b) * 6) + 4);
+        const int16_t lw = (int16_t)(SAFE_X0 + SAFE_W - lx);
+        if (lw > 6) {
+          c.drawFastHLine(lx, (int16_t)(ly + 5), lw, 1);           // the track
+          const int16_t fw = (int16_t)((int32_t)lw * wx_pop / 100);
+          if (fw > 0) c.fillRect(lx, (int16_t)(ly + 2), fw, 3, 1); // how much
         }
       }
       break;
