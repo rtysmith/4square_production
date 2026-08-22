@@ -234,6 +234,40 @@ static void x_pair(GFXcanvas1 &c, const char *cap, const char *val,
   x_center(c, val, val_size, (int16_t)(SAFE_Y0 + 16));
 }
 
+// The same shape for a panel that HAS no number: the caption, a plain NO DATA,
+// and underneath it the fetcher's own reason, wrapped onto two short lines so
+// nothing runs off the edge. A blank screen that explains itself.
+static void x_why(GFXcanvas1 &c, const char *cap, uint8_t which) {
+  x_center(c, cap, 1, (int16_t)(SAFE_Y0 + 2));
+  x_center(c, "NO DATA", 2, (int16_t)(SAFE_Y0 + 14));
+  const char *r = extras_feed_reason(which);
+  if (r == nullptr || r[0] == 0) r = "WAITING";
+  const uint8_t cols = (uint8_t)(SAFE_W / 6);
+  if (strlen(r) <= cols) {
+    x_center(c, r, 1, (int16_t)(SAFE_Y0 + 36));
+    return;
+  }
+  // Break at the last space that still fits; otherwise cut hard.
+  char a[24], b2[24];
+  size_t cut = cols;
+  for (size_t i = 0; i < strlen(r) && i <= cols; i++) if (r[i] == ' ') cut = i;
+  snprintf(a, sizeof a, "%.*s", (int)cut, r);
+  snprintf(b2, sizeof b2, "%s", r + cut + (r[cut] == ' ' ? 1 : 0));
+  x_center(c, a, 1, (int16_t)(SAFE_Y0 + 32));
+  x_center(c, b2, 1, (int16_t)(SAFE_Y0 + 41));
+}
+
+// "2H OLD" style footnote for a panel showing cached numbers that have stopped
+// refreshing. Silent while the feed is healthy.
+static void x_stale(GFXcanvas1 &c, uint8_t which, int32_t after_min) {
+  const int32_t age = extras_feed_age_min(which);
+  if (age < after_min) return;
+  char t[16];
+  if (age < 90) snprintf(t, sizeof t, "%ldM OLD", (long)age);
+  else          snprintf(t, sizeof t, "%ldH OLD", (long)(age / 60));
+  x_center(c, t, 1, (int16_t)(SAFE_Y0 + SAFE_H - 8));
+}
+
 
 
 
@@ -369,6 +403,32 @@ void extras_set_weather(uint8_t icon, int16_t cur_c10, int16_t max_c10,
   }
 }
 bool extras_weather_valid() { return wx_valid; }
+
+// ---- why a remote panel is empty -------------------------------------------
+// Two tiny slots, written by the fetcher and read by the renderers. Kept in
+// RAM only: a reason is about right now, and after a reboot the first read is
+// seconds away anyway.
+static char     feed_reason[2][18] = { "STARTING", "STARTING" };
+static uint32_t feed_ok_ms[2]      = { 0, 0 };
+static bool     feed_ever_ok[2]    = { false, false };
+
+void extras_feed_note(uint8_t which, const char *reason) {
+  if (which > 1 || reason == nullptr) return;
+  snprintf(feed_reason[which], sizeof feed_reason[which], "%s", reason);
+}
+void extras_feed_ok(uint8_t which) {
+  if (which > 1) return;
+  feed_reason[which][0] = 0;
+  feed_ok_ms[which] = millis();
+  feed_ever_ok[which] = true;
+}
+const char *extras_feed_reason(uint8_t which) {
+  return which > 1 ? "" : feed_reason[which];
+}
+int32_t extras_feed_age_min(uint8_t which) {
+  if (which > 1 || !feed_ever_ok[which]) return -1;
+  return (int32_t)((millis() - feed_ok_ms[which]) / 60000u);
+}
 
 void extras_tick(uint32_t now_ms, int16_t temp_c10, uint8_t rh, bool sht_ok,
                  uint8_t hour) {
@@ -976,9 +1036,9 @@ void extras_face_render(GFXcanvas1 &c, uint8_t w, uint8_t ov, const FaceData &d)
     }
     case X_LIFOLLOWERS: {
       // The panel is called LINKEDIN, whatever it is showing.
+      if (!li_valid) { x_why(c, "LINKEDIN", 0); break; }
       if (li_followers >= 10000) snprintf(b, sizeof b, "%ld.%ldk", (long)(li_followers / 1000), (long)((li_followers % 1000) / 100));
       else snprintf(b, sizeof b, "%ld", (long)li_followers);
-      if (!li_valid) snprintf(b, sizeof b, "--");
       // With a corner in play the pair is centred in the space ABOVE the
       // overlay row rather than jammed against the top edge: pinning it high
       // left the number floating with a hole under it, which is the thing that
@@ -988,13 +1048,17 @@ void extras_face_render(GFXcanvas1 &c, uint8_t w, uint8_t ov, const FaceData &d)
         x_center(c, b, 3, (int16_t)(SAFE_Y0 + 17));
       } else {
         x_pair(c, "LINKEDIN", b, 4);
+        // Numbers that have stopped refreshing say so rather than quietly
+        // pretending to be current.
+        x_stale(c, 0, 45);
       }
       break;
     }
     case X_LIWEEK: {
-      if (!li_valid) { x_pair(c, "7 DAYS", "--", 4); break; }
+      if (!li_valid) { x_why(c, "7 DAYS", 0); break; }
       snprintf(b, sizeof b, "%+ld", (long)li_gained);
       x_pair(c, "NEW, 7 DAYS", b, 4);
+      x_stale(c, 0, 45);
       break;
     }
     // ---- the two "whole thing in one panel" screens ------------------------
@@ -1043,7 +1107,7 @@ void extras_face_render(GFXcanvas1 &c, uint8_t w, uint8_t ov, const FaceData &d)
     // circle costs a whole character of width and tells you nothing you did
     // not already know from a screen labelled WEATHER.
     case X_WEATHER: {
-      if (!wx_valid) { x_pair(c, "WEATHER", "--", 4); break; }
+      if (!wx_valid) { x_why(c, "WEATHER", 1); break; }
       static const char *const WXN[8] = { "CLEAR", "PARTLY", "CLOUDY", "FOG",
                                           "DRIZZLE", "RAIN", "SNOW", "STORMS" };
 
