@@ -24,6 +24,8 @@ uint8_t webcfg_wifi_stage();
 uint8_t webcfg_wifi_progress();
 uint8_t webcfg_wifi_attempt();
 uint8_t webcfg_wifi_network();
+// The SSID the keeper is currently trying (or holding), for the boot screen.
+const char *webcfg_wifi_target_ssid();
 // Last concrete failure: 0 none, 1 network missing, 2 authentication rejected,
 // 3 join timeout, 4 DHCP supplied no address, 5 radio unresponsive.
 uint8_t webcfg_wifi_failure();
