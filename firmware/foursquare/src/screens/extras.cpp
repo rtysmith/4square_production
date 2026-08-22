@@ -297,10 +297,33 @@ void extras_overlay_secbar(GFXcanvas1 &c, int seconds) {
   if (fill > 0) c.fillRect(x, y, fill, 4, 1);
 }
 
+// Signal strength as three bars, bottom right. Empty outlines for the bars the
+// signal doesn't reach; a small x when the radio is down altogether.
+void extras_overlay_wifi(GFXcanvas1 &c) {
+  const int16_t base = (int16_t)(SAFE_Y0 + SAFE_H - 2);
+  const int16_t x0 = (int16_t)(SAFE_X0 + SAFE_W - 14);
+  if (!ui_env.wifi_up) {
+    c.drawLine(x0, (int16_t)(base - 8), (int16_t)(x0 + 8), base, 1);
+    c.drawLine(x0, base, (int16_t)(x0 + 8), (int16_t)(base - 8), 1);
+    return;
+  }
+  const int rssi = ui_env.rssi;
+  int bars = 1;
+  if (rssi > -60)      bars = 3;
+  else if (rssi > -72) bars = 2;
+  for (int i = 0; i < 3; i++) {
+    const int16_t h = (int16_t)(3 + i * 3);
+    const int16_t x = (int16_t)(x0 + i * 5);
+    if (i < bars) c.fillRect(x, (int16_t)(base - h), 3, h, 1);
+    else          c.drawRect(x, (int16_t)(base - h), 3, h, 1);
+  }
+}
+
 static void x_overlay(GFXcanvas1 &c, uint8_t ov, const FaceData &d) {
   if (ov == 0) return;                      // OV_NONE
   if (ov == 4) { extras_overlay_week(c); return; }   // OV_LIWEEK, bottom left
   if (ov == 5) { extras_overlay_secbar(c, x_secs(d, 0)); return; }  // OV_SECBAR
+  if (ov == 6) { extras_overlay_wifi(c); return; }   // OV_WIFI, bottom right
   char t[12];
   t[0] = 0;
   if (ov == 1) {                            // OV_SECONDS
@@ -578,7 +601,7 @@ void extras_face_render(GFXcanvas1 &c, uint8_t w, uint8_t ov, const FaceData &d)
       // don't touch.
       if (!d.hour24 && ov != 2) {
         int16_t y = (int16_t)(SAFE_Y0 + 38);
-        if (ov == 5) y = (int16_t)(SAFE_Y0 + 28);
+        if (ov == 5) y = (int16_t)(SAFE_Y0 + 34);
         x_center(c, d.hour < 12 ? "AM" : "PM", 1, y);
       }
       break;
