@@ -937,6 +937,31 @@ static bool wifi_ready_for_remote_read(uint32_t now) {
          (uint32_t)(now - wifi_stable_since_ms) >= 10000u;
 }
 
+// The same test, but it also tells the panels why they are still empty.
+static bool remote_read_ready(uint32_t now, uint8_t which) {
+  if (WiFi.status() != WL_CONNECTED) { extras_feed_note(which, "NO WIFI"); return false; }
+  if ((uint32_t)WiFi.localIP() == 0u) { extras_feed_note(which, "NO IP YET"); return false; }
+  if (!wifi_ready_for_remote_read(now)) { extras_feed_note(which, "WIFI SETTLING"); return false; }
+  return true;
+}
+
+// HTTPClient's negative codes as something a person can read off a panel.
+static void note_http_error(uint8_t which, int code) {
+  char t[18];
+  switch (code) {
+    case -1:  snprintf(t, sizeof t, "CANT CONNECT"); break;
+    case -2:  snprintf(t, sizeof t, "SEND FAILED"); break;
+    case -3:  snprintf(t, sizeof t, "SEND FAILED"); break;
+    case -4:  snprintf(t, sizeof t, "NO REPLY"); break;
+    case -5:  snprintf(t, sizeof t, "LINK LOST"); break;
+    case -11: snprintf(t, sizeof t, "TIMED OUT"); break;
+    default:
+      if (code > 0) snprintf(t, sizeof t, "HTTP %d", code);
+      else          snprintf(t, sizeof t, "NET ERR %d", code);
+  }
+  extras_feed_note(which, t);
+}
+
 static long json_long(const String &body, const char *key, bool *found) {
   const int at = body.indexOf(key);
   *found = at >= 0;
@@ -947,7 +972,7 @@ static long json_long(const String &body, const char *key, bool *found) {
 static void linkedin_tick() {
   if (updating) return;
   const uint32_t now = millis();
-  if (!wifi_ready_for_remote_read(now)) return;
+  if (!remote_read_ready(now, 0)) return;
   if ((int32_t)(now - li_next_ms) < 0) return;
   li_next_ms = now + 15u * 60u * 1000u;
 
@@ -959,7 +984,11 @@ static void linkedin_tick() {
   tls.setTimeout(12);
   tls.setHandshakeTimeout(12);
   HTTPClient http;
-  if (!http.begin(tls, LINKEDIN_URL)) { li_next_ms = now + 30000u; return; }
+  if (!http.begin(tls, LINKEDIN_URL)) {
+    extras_feed_note(0, "BAD URL");
+    li_next_ms = now + 30000u;
+    return;
+  }
   http.setReuse(false);
   http.setConnectTimeout(8000);
   http.setTimeout(12000);
@@ -973,11 +1002,18 @@ static void linkedin_tick() {
     bool a = false, b = false;
     const long followers = json_long(body, "\"followers\":", &a);
     const long gained    = json_long(body, "\"gained7d\":", &b);
-    if (a) extras_set_linkedin((int32_t)followers, (int32_t)(b ? gained : 0));
-    else li_next_ms = now + 60u * 1000u;
+    if (a) {
+      extras_set_linkedin((int32_t)followers, (int32_t)(b ? gained : 0));
+      extras_feed_ok(0);
+    } else {
+      // A 200 with no number in it: the app answered, LinkedIn had nothing.
+      extras_feed_note(0, "NO COUNT YET");
+      li_next_ms = now + 60u * 1000u;
+    }
     Serial.printf("# linkedin: %ld followers (+%ld)\n", followers, gained);
   } else {
     Serial.printf("# linkedin fetch failed: %d\n", code);
+    note_http_error(0, code);
     // Try again sooner than the full period, but not in a tight loop.
     li_next_ms = now + 60u * 1000u;
   }
@@ -997,7 +1033,7 @@ static uint32_t wx_next_ms = 12000;
 static void weather_tick() {
   if (updating) return;
   const uint32_t now = millis();
-  if (!wifi_ready_for_remote_read(now)) return;
+  if (!remote_read_ready(now, 1)) return;
   if ((int32_t)(now - wx_next_ms) < 0) return;
   wx_next_ms = now + 20u * 60u * 1000u;
 
@@ -1006,7 +1042,11 @@ static void weather_tick() {
   tls.setTimeout(12);
   tls.setHandshakeTimeout(12);
   HTTPClient http;
-  if (!http.begin(tls, WEATHER_URL)) { wx_next_ms = now + 30000u; return; }
+  if (!http.begin(tls, WEATHER_URL)) {
+    extras_feed_note(1, "BAD URL");
+    wx_next_ms = now + 30000u;
+    return;
+  }
   http.setReuse(false);
   http.setConnectTimeout(8000);
   http.setTimeout(12000);
@@ -1029,11 +1069,17 @@ static void weather_tick() {
       extras_set_weather((uint8_t)icon, (int16_t)cur,
                          (int16_t)(cc ? mx : cur), (int16_t)(ee ? mn : cur),
                          (uint8_t)(dd ? pop : 0));
+      extras_feed_ok(1);
+    } else {
+      // The forecast service answered the app, but with nothing usable.
+      extras_feed_note(1, "NO FORECAST");
+      wx_next_ms = now + 60u * 1000u;
     }
     if (ff || gg) extras_set_sun((int16_t)(ff ? sr : -1), (int16_t)(gg ? ss : -1));
     Serial.printf("# weather: icon %ld cur %ld pop %ld\n", icon, cur, pop);
   } else {
     Serial.printf("# weather fetch failed: %d\n", code);
+    note_http_error(1, code);
     wx_next_ms = now + 60u * 1000u;
   }
   http.end();
