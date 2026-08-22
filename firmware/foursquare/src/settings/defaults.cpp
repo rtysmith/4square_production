@@ -117,7 +117,10 @@ void settings_sanitize(Settings &s) {
         !(s.slot_widget[i] >= X_FIRST && s.slot_widget[i] < X_FIRST + X_COUNT))
       s.slot_widget[i]  = d.slot_widget[i];
     if (s.slot_style[i]   >= S_COUNT)  s.slot_style[i]   = d.slot_style[i];
-    if (s.slot_overlay[i] >= OV_COUNT) s.slot_overlay[i] = d.slot_overlay[i];
+    // 4 is OV_LIWEEK, the weekly LinkedIn gain drawn bottom-left by
+    // screens/extras.cpp. It is a legal saved value, not corruption.
+    if (s.slot_overlay[i] >= OV_COUNT && s.slot_overlay[i] > 5)
+      s.slot_overlay[i] = d.slot_overlay[i];
     // A style the widget cannot render is in range but still wrong.
     if (!widget_allows(s.slot_widget[i], s.slot_style[i])) {
       s.slot_style[i] = S_OUTLINE;
