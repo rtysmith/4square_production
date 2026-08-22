@@ -1595,6 +1595,8 @@ bool widget_allows(uint8_t w, uint8_t s) {
   if (extras_is_widget(w)) return s == S_OUTLINE;
   // A derived screen draws itself; OUTLINE is the only style it accepts.
   if (extras_is_widget(w)) return s == S_OUTLINE;
+  // A derived screen draws itself; OUTLINE is the only style it accepts.
+  if (extras_is_widget(w)) return s == S_OUTLINE;
   // The INVERT bit is a COMPOSITING mode, not a glyph style, so it is decided
   // separately from what the widget can draw. Every widget already has a
   // canonical rendering for a style it cannot honour — a DATE is always two
