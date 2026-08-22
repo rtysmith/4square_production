@@ -349,6 +349,13 @@ void webcfg_wifi_keeper_tick() {
     wifi_last_up_ms = now;
     ui_env.wifi_up = true;
     ui_env.rssi = WiFi.RSSI();
+    // The address is what every screen actually shows. The keeper owns the
+    // join now, so the keeper owns this field too: refresh it on every online
+    // tick (a renewed lease can change it) rather than trusting whatever the
+    // original sketch's one-shot connect left behind.
+    snprintf(ui_env.ip, sizeof ui_env.ip, "%s",
+             WiFi.localIP().toString().c_str());
+
     if (newly_up) {
       wifi_stable_since_ms = now == 0 ? 1 : now;
       if (outage_ms) {
@@ -927,7 +934,7 @@ static bool wifi_ready_for_remote_read(uint32_t now) {
   // for one uninterrupted minute of connectivity first.
   return WiFi.status() == WL_CONNECTED && (uint32_t)WiFi.localIP() != 0u &&
          wifi_stable_since_ms != 0 &&
-         (uint32_t)(now - wifi_stable_since_ms) >= 60000u;
+         (uint32_t)(now - wifi_stable_since_ms) >= 10000u;
 }
 
 static long json_long(const String &body, const char *key, bool *found) {
@@ -949,12 +956,13 @@ static void linkedin_tick() {
   // Keep the main loop available to the web server and Wi-Fi keeper. The app's
   // endpoint has its own four-second fallback to cached data, so six seconds is
   // enough without making a healthy clock appear offline for fifteen seconds.
-  tls.setTimeout(3);
+  tls.setTimeout(12);
+  tls.setHandshakeTimeout(12);
   HTTPClient http;
-  if (!http.begin(tls, LINKEDIN_URL)) return;
+  if (!http.begin(tls, LINKEDIN_URL)) { li_next_ms = now + 30000u; return; }
   http.setReuse(false);
-  http.setConnectTimeout(3000);
-  http.setTimeout(3000);
+  http.setConnectTimeout(8000);
+  http.setTimeout(12000);
   // DNS, TLS, headers, and body reads are all synchronous in HTTPClient. Keep
   // the loop watchdog out of this finite background transaction; otherwise a
   // slow DNS/TLS exchange can reset the whole clock seconds after startup.
@@ -966,7 +974,10 @@ static void linkedin_tick() {
     const long followers = json_long(body, "\"followers\":", &a);
     const long gained    = json_long(body, "\"gained7d\":", &b);
     if (a) extras_set_linkedin((int32_t)followers, (int32_t)(b ? gained : 0));
+    else li_next_ms = now + 60u * 1000u;
+    Serial.printf("# linkedin: %ld followers (+%ld)\n", followers, gained);
   } else {
+    Serial.printf("# linkedin fetch failed: %d\n", code);
     // Try again sooner than the full period, but not in a tight loop.
     li_next_ms = now + 60u * 1000u;
   }
@@ -992,12 +1003,13 @@ static void weather_tick() {
 
   WiFiClientSecure tls;
   tls.setInsecure();
-  tls.setTimeout(3);
+  tls.setTimeout(12);
+  tls.setHandshakeTimeout(12);
   HTTPClient http;
-  if (!http.begin(tls, WEATHER_URL)) return;
+  if (!http.begin(tls, WEATHER_URL)) { wx_next_ms = now + 30000u; return; }
   http.setReuse(false);
-  http.setConnectTimeout(3000);
-  http.setTimeout(3000);
+  http.setConnectTimeout(8000);
+  http.setTimeout(12000);
   disableLoopWDT();
   const int code = http.GET();
   if (code == 200) {
@@ -1019,7 +1031,9 @@ static void weather_tick() {
                          (uint8_t)(dd ? pop : 0));
     }
     if (ff || gg) extras_set_sun((int16_t)(ff ? sr : -1), (int16_t)(gg ? ss : -1));
+    Serial.printf("# weather: icon %ld cur %ld pop %ld\n", icon, cur, pop);
   } else {
+    Serial.printf("# weather fetch failed: %d\n", code);
     wx_next_ms = now + 60u * 1000u;
   }
   http.end();
