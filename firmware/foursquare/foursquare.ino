@@ -388,7 +388,6 @@ static void ota_setup() {
 // works.
 static uint8_t  wifi_fail_streak = 0;   // consecutive joins that did not stick
 static uint32_t wifi_down_since  = 0;   // millis() of the first frame with no link
-#define WIFI_DEAD_REBOOT_MS (15u * 60u * 1000u)
 
 static void wifi_attempt() {
   // A stack that has stopped answering needs more than another begin().
@@ -463,11 +462,6 @@ static void wifi_tick() {
     next_wifi_try = now + WIFI_RETRY_MS;
   }
   if (wifi_down_since == 0) wifi_down_since = now == 0 ? 1 : now;
-  else if ((uint32_t)(now - wifi_down_since) > WIFI_DEAD_REBOOT_MS) {
-    Serial.println("# wifi: no link for fifteen minutes; rebooting");
-    delay(50);
-    ESP.restart();
-  }
   led_hold(LED_WIFI_JOINING, true);
   if ((int32_t)(now - next_wifi_try) < 0) return;
   // RETRY ON A CLOCK. Gating on the status code failed both ways: re-begin()ing
@@ -558,7 +552,7 @@ void loop() {
   last_loop_ms = now;
 
 #ifndef DEMO_BUILD
-  wifi_tick();
+  webcfg_wifi_keeper_tick();
 #else
   // ========================================================================
   // DEMO BUILD: THE RADIO IS NEVER BROUGHT UP. See src/demo.h.
