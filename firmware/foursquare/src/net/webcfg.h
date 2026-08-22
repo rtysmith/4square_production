@@ -12,6 +12,11 @@ void webcfg_begin();
 // Pump the HTTP server while Wi-Fi is connected.
 void webcfg_tick();
 
+// The clock's single Wi-Fi owner. It keeps the current association through
+// transient drops, retries both configured networks with bounded backoff, and
+// power-cycles only the radio when the driver itself stops responding.
+void webcfg_wifi_keeper_tick();
+
 // True while an HTTP firmware upload is in flight, so the main loop can leave
 // the screens and the I2C bus alone.
 bool webcfg_updating();
