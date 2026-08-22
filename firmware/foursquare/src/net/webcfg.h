@@ -24,6 +24,9 @@ uint8_t webcfg_wifi_stage();
 uint8_t webcfg_wifi_progress();
 uint8_t webcfg_wifi_attempt();
 uint8_t webcfg_wifi_network();
+// Last concrete failure: 0 none, 1 network missing, 2 authentication rejected,
+// 3 join timeout, 4 DHCP supplied no address, 5 radio unresponsive.
+uint8_t webcfg_wifi_failure();
 
 // True while an HTTP firmware upload is in flight, so the main loop can leave
 // the screens and the I2C bus alone.
