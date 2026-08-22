@@ -111,22 +111,23 @@ static uint8_t splash_next_slot() {
 
 static const char *splash_stage_label(uint8_t stage) {
   if (stage == 0) return "ONLINE";
-  if (stage == 1) return "CHECKING LINK";
+  if (stage == 1) return "LINK CHK";
   if (stage == 2) return "JOINING";
-  if (stage == 3) return "ASKING FOR IP";
-  if (stage == 4) return "WAITING TO RETRY";
-  if (stage == 6) return "SCANNING FOR WIFI";
-  return "RESETTING RADIO";
+  if (stage == 3) return "GET IP";
+  if (stage == 4) return "RETRY";
+  if (stage == 6) return "SCANNING";
+  return "RADIO RST";
 }
 
 static const char *splash_fail_label(uint8_t failure) {
-  if (failure == 1) return "NO SUCH NETWORK";
-  if (failure == 2) return "PASSWORD REFUSED";
-  if (failure == 3) return "JOIN TIMED OUT";
-  if (failure == 4) return "NO IP ADDRESS";
+  if (failure == 1) return "NOT FOUND";
+  if (failure == 2) return "BAD PASSWORD";
+  if (failure == 3) return "JOIN TIMEOUT";
+  if (failure == 4) return "NO IP";
   if (failure == 5) return "RADIO STUCK";
   return 0;
 }
+
 
 // Long SSIDs do not fit a 128px panel at size 1; clip rather than wrap so the
 // name still reads as itself.
@@ -180,40 +181,40 @@ void extras_splash_draw(GFXcanvas1 &c) {
 
     // ---- bottom left: what it is doing right now ---------------------------
     case 2:
-      x_center(c, "STEP", 1, (int16_t)(SAFE_Y0 + 2));
-      x_center(c, splash_stage_label(online ? 0 : stage), 1,
-               (int16_t)(SAFE_Y0 + 16));
-      x_bar(c, (int16_t)(SAFE_Y0 + 28), 8,
+      snprintf(b, sizeof b, "STEP %s", splash_stage_label(online ? 0 : stage));
+      x_center(c, b, 1, (int16_t)(SAFE_Y0 + 4));
+      x_bar(c, (int16_t)(SAFE_Y0 + 18), 8,
             online ? 100 : webcfg_wifi_progress());
       snprintf(b, sizeof b, "%u OF 5", (unsigned)(online ? 5 : (stage > 5 ? 1 : stage)));
-      x_center(c, b, 1, (int16_t)(SAFE_Y0 + 42));
+      x_center(c, b, 1, (int16_t)(SAFE_Y0 + 32));
       snprintf(b, sizeof b, "UP %lu:%02lu",
                (unsigned long)(secs / 60u), (unsigned long)(secs % 60u));
-      x_center(c, b, 1, (int16_t)(SAFE_Y0 + 54));
+      x_center(c, b, 1, (int16_t)(SAFE_Y0 + 46));
       break;
 
     // ---- bottom right: the result, good or bad -----------------------------
     default:
       if (online) {
-        x_center(c, "READY", 1, (int16_t)(SAFE_Y0 + 2));
-        x_center(c, ui_env.ip, 1, (int16_t)(SAFE_Y0 + 16));
-        x_center(c, "foursquare-", 1, (int16_t)(SAFE_Y0 + 30));
-        x_center(c, "revo.local", 1, (int16_t)(SAFE_Y0 + 40));
-        x_bar(c, (int16_t)(SAFE_Y0 + 52), 7, 100);
+        x_center(c, "READY", 1, (int16_t)(SAFE_Y0 + 4));
+        x_center(c, ui_env.ip, 1, (int16_t)(SAFE_Y0 + 18));
+        x_center(c, "foursquare-", 1, (int16_t)(SAFE_Y0 + 32));
+        x_center(c, "revo.local", 1, (int16_t)(SAFE_Y0 + 42));
+        x_bar(c, (int16_t)(SAFE_Y0 + 54), 7, 100);
       } else {
-        x_center(c, "LAST PROBLEM", 1, (int16_t)(SAFE_Y0 + 2));
-        x_center(c, failed ? failed : "NONE YET", 1, (int16_t)(SAFE_Y0 + 16));
-        x_center(c, stage == 3 ? "WAITING ON THE" : "WAITING FOR", 1,
+        snprintf(b, sizeof b, "LAST %s", failed ? failed : "OK");
+        x_center(c, b, 1, (int16_t)(SAFE_Y0 + 4));
+        x_center(c, stage == 3 ? "WAITING ON" : "WAITING FOR", 1,
+                 (int16_t)(SAFE_Y0 + 20));
+        x_center(c, stage == 3 ? "ROUTER IP" : "WIFI LINK", 1,
                  (int16_t)(SAFE_Y0 + 32));
-        x_center(c, stage == 3 ? "ROUTER FOR AN IP" : "WIFI TO COME UP", 1,
-                 (int16_t)(SAFE_Y0 + 42));
-        snprintf(b, sizeof b, "TRY %u  AP %u", (unsigned)webcfg_wifi_attempt(),
+        snprintf(b, sizeof b, "TRY %u AP %u", (unsigned)webcfg_wifi_attempt(),
                  (unsigned)webcfg_wifi_network());
-        x_center(c, b, 1, (int16_t)(SAFE_Y0 + 54));
+        x_center(c, b, 1, (int16_t)(SAFE_Y0 + 48));
       }
       break;
   }
 }
+
 
 
 
