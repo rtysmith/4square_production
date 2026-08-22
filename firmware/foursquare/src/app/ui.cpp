@@ -712,6 +712,18 @@ static void fill_pagedata(PageData &d, const RtcTime &t) {
 // one that needs repainting between minutes.
 static const uint8_t CLOCK_SEC_MASK = 0x02;
 
+// Which panels need repainting between minutes: every slot whose saved
+// corner overlay is OV_SECONDS (1). Variant 0 is the editor's layout;
+// the button-cycled variants still use the factory answer.
+static uint8_t clock_sec_mask() {
+  if (variant[PG_CLOCK] != 0) return CLOCK_SEC_MASK;
+  uint8_t m = 0;
+  for (uint8_t i = 0; i < 4; i++)
+    if (cfg.slot_overlay[i] == 1 || cfg.slot_overlay[i] == 5)
+      m |= (uint8_t)(1 << i);
+  return m;
+}
+
 void ui_paint(uint32_t now, const RtcTime &t, bool force) {
   (void)now;
   bool ok_changed = (t.ok != last_ok);
@@ -731,7 +743,7 @@ void ui_paint(uint32_t now, const RtcTime &t, bool force) {
       // content is a constant "--", so it needs painting once — driving four
       // 1 KB frames every 50 ms instead asks for more than 100% of the bus.
       if (state_changed || min_changed) mask = 0x0F;
-      else if (sec_changed)             mask = CLOCK_SEC_MASK;
+      else if (sec_changed)             mask = clock_sec_mask();
       break;
     case PG_SENSOR:
       // Uptime ticks, so this one genuinely changes every second.
