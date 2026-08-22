@@ -358,7 +358,7 @@ static void ota_setup() {
     ota_started = false;
     ota_active = false;
     enableLoopWDT();
-    WiFi.setTxPower(WIFI_POWER_11dBm);
+    WiFi.setTxPower(WIFI_POWER_17dBm);
     led_hold(LED_OTA_ACTIVE, false);
     led_fire(LED_OTA_FAIL);
     // The panels are left exactly as onStart put them — dark — and ui_tick's
@@ -386,15 +386,29 @@ static void ota_setup() {
 // all, with the credentials verified correct against NetworkManager's own PSK.
 // Rather than keep guessing which difference mattered, do what demonstrably
 // works.
+static uint8_t  wifi_fail_streak = 0;   // consecutive joins that did not stick
+static uint32_t wifi_down_since  = 0;   // millis() of the first frame with no link
+#define WIFI_DEAD_REBOOT_MS (15u * 60u * 1000u)
+
 static void wifi_attempt() {
+  // A stack that has stopped answering needs more than another begin().
+  if (wifi_fail_streak >= 6 && (wifi_fail_streak % 6) == 0) {
+    Serial.println("# wifi: resetting the radio");
+    WiFi.disconnect(true, false);
+    WiFi.mode(WIFI_OFF);
+    delay(300);
+  }
   WiFi.disconnect(false, false);
   delay(100);
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
-  WiFi.setTxPower(WIFI_POWER_11dBm);
+  WiFi.setTxPower(WIFI_POWER_17dBm);
   WiFi.setAutoReconnect(false);
   const bool two = strcmp(WIFI_SSID, WIFI_SSID2) != 0;
-  if (two) wifi_which ^= 1; else wifi_which = 0;
+  // Stay on the network that last worked; swap only after it fails twice.
+  if (two) { if (wifi_fail_streak > 0 && (wifi_fail_streak % 2) == 0) wifi_which ^= 1; }
+  else     { wifi_which = 0; }
+  if (wifi_fail_streak < 250) wifi_fail_streak++;
   WiFi.begin(wifi_which ? WIFI_SSID2 : WIFI_SSID,
              wifi_which ? WIFI_PASS2 : WIFI_PASS);
   Serial.print("# wifi: attempting join, net ");
@@ -430,6 +444,8 @@ static void wifi_tick() {
       if (!ota_up) ota_setup();
       webcfg_begin();
     }
+    wifi_fail_streak = 0;
+    wifi_down_since = 0;
     ui_env.rssi = WiFi.RSSI();
     ui_env.ota_ready = ota_up;
     ArduinoOTA.handle();
@@ -445,6 +461,12 @@ static void wifi_tick() {
     // into an immediate disconnect. Give this association a full recovery
     // window before deliberately trying the other saved network.
     next_wifi_try = now + WIFI_RETRY_MS;
+  }
+  if (wifi_down_since == 0) wifi_down_since = now == 0 ? 1 : now;
+  else if ((uint32_t)(now - wifi_down_since) > WIFI_DEAD_REBOOT_MS) {
+    Serial.println("# wifi: no link for fifteen minutes; rebooting");
+    delay(50);
+    ESP.restart();
   }
   led_hold(LED_WIFI_JOINING, true);
   if ((int32_t)(now - next_wifi_try) < 0) return;
@@ -562,7 +584,7 @@ void loop() {
       ota_active = false;
       ota_started = false;
       enableLoopWDT();
-      WiFi.setTxPower(WIFI_POWER_11dBm);
+      WiFi.setTxPower(WIFI_POWER_17dBm);
       led_hold(LED_OTA_ACTIVE, false);
       led_all_off();
       ui_force_repaint();
