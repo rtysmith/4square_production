@@ -1339,10 +1339,11 @@ static void draw_numeric(GFXcanvas1 &c, uint8_t style, uint8_t val,
 
 void face_render(GFXcanvas1 &c, uint8_t w, uint8_t s, uint8_t ov,
                  const FaceData &d) {
-    if ((ov == 4 || ov == 5) && !extras_is_widget(w)) {
+      if (ov >= 4 && ov <= 6 && !extras_is_widget(w)) {
     face_render(c, w, s, 0, d);
-    if (ov == 4) extras_overlay_week(c);
-    else         extras_overlay_secbar(c, (int)d.second);
+    if (ov == 4)      extras_overlay_week(c);
+    else if (ov == 5) extras_overlay_secbar(c, (int)d.second);
+    else              extras_overlay_wifi(c);
     return;
   }
   // The derived screens are their own family: one layout each, no styles
@@ -1549,6 +1550,8 @@ const char *overlay_name(uint8_t o) { return o < OV_COUNT ? OVERLAY_NAME[o] : "?
 // it. The host prover walks exactly this predicate, so what it checks and what
 // the menu offers cannot drift apart.
 bool widget_allows(uint8_t w, uint8_t s) {
+  // A derived screen draws itself; OUTLINE is the only style it accepts.
+  if (extras_is_widget(w)) return s == S_OUTLINE;
   // A derived screen draws itself; OUTLINE is the only style it accepts.
   if (extras_is_widget(w)) return s == S_OUTLINE;
   // A derived screen draws itself; OUTLINE is the only style it accepts.
