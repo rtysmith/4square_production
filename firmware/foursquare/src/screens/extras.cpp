@@ -285,18 +285,16 @@ void extras_overlay_week(GFXcanvas1 &c) {
   x_text(c, t, 1, (int16_t)(SAFE_Y0 + SAFE_H - 8), SAFE_X0);
 }
 
-// Seconds without digits: a hairline track across the bottom of the safe area
-// that fills left to right once a minute, plus a tick that walks it. Reads at a
-// glance from across the room, where a 6px ":07" does not.
+// Seconds without digits: a straight filled bar across the bottom of the safe
+// area that grows left to right once a minute. No outline — just the bar.
 void extras_overlay_secbar(GFXcanvas1 &c, int seconds) {
   if (seconds < 0) return;
   const int16_t y = (int16_t)(SAFE_Y0 + SAFE_H - 4);
   const int16_t x = (int16_t)(SAFE_X0 + 2);
   const int16_t w = (int16_t)(SAFE_W - 4);
   if (w < 8) return;
-  c.drawRect(x, y, w, 4, 1);                        // the empty track
-  const int16_t fill = (int16_t)((long)(w - 2) * (seconds % 60) / 59L);
-  if (fill > 0) c.fillRect((int16_t)(x + 1), (int16_t)(y + 1), fill, 2, 1);
+  const int16_t fill = (int16_t)((long)w * (seconds % 60) / 59L);
+  if (fill > 0) c.fillRect(x, y, fill, 4, 1);
 }
 
 static void x_overlay(GFXcanvas1 &c, uint8_t ov, const FaceData &d) {
@@ -320,7 +318,8 @@ static void x_overlay(GFXcanvas1 &c, uint8_t ov, const FaceData &d) {
     return;
   }
   const int16_t w = (int16_t)(strlen(t) * 6 - 1);
-  x_text(c, t, 1, (int16_t)(SAFE_Y0 + SAFE_H - 8), (int16_t)(SAFE_X0 + SAFE_W - w));
+  // Lifted a few pixels so AM/PM and the seconds bar don't feel glued together.
+  x_text(c, t, 1, (int16_t)(SAFE_Y0 + SAFE_H - 12), (int16_t)(SAFE_X0 + SAFE_W - w));
 }
 
 // ---- the weather icon ------------------------------------------------------
@@ -544,17 +543,17 @@ void extras_face_render(GFXcanvas1 &c, uint8_t w, uint8_t ov, const FaceData &d)
       break;
     }
     case X_LIFOLLOWERS: {
-      if (!li_valid) { x_pair(c, "LINKEDIN", "--", 4); break; }
+      // The panel is called LINKEDIN, whatever it is showing.
       if (li_followers >= 10000) snprintf(b, sizeof b, "%ld.%ldk", (long)(li_followers / 1000), (long)((li_followers % 1000) / 100));
       else snprintf(b, sizeof b, "%ld", (long)li_followers);
-      // Leave a dedicated bottom row when the +7-day corner is selected.
-      // A size-4 value starting at y+16 reaches the overlay baseline; lifting
-      // it six pixels keeps the total and weekly gain visually separate.
-      if (ov == 4) {
-        x_center(c, "FOLLOWERS", 1, (int16_t)(SAFE_Y0));
-        x_center(c, b, 4, (int16_t)(SAFE_Y0 + 10));
+      if (!li_valid) snprintf(b, sizeof b, "--");
+      // Leave a clear bottom row when a corner is selected: a size-3 value
+      // pinned high cannot reach the overlay baseline.
+      if (ov != 0) {
+        x_center(c, "LINKEDIN", 1, (int16_t)(SAFE_Y0));
+        x_center(c, b, 3, (int16_t)(SAFE_Y0 + 10));
       } else {
-        x_pair(c, "FOLLOWERS", b, 4);
+        x_pair(c, "LINKEDIN", b, 4);
       }
       break;
     }
@@ -573,10 +572,18 @@ void extras_face_render(GFXcanvas1 &c, uint8_t w, uint8_t ov, const FaceData &d)
       if (!d.hour24) { hh = (uint8_t)(d.hour % 12); if (hh == 0) hh = 12; }
       snprintf(b, sizeof b, "%u:%02u", (unsigned)hh, (unsigned)d.minute);
       x_center(c, b, 3, (int16_t)(SAFE_Y0 + 12));
-      if (!d.hour24) x_center(c, d.hour < 12 ? "AM" : "PM", 1,
-                              (int16_t)(SAFE_Y0 + 40));
+      // The AM/PM corner already says it: don't print a second one right
+      // beside it. Otherwise it sits under the time, clear of the corners.
+      // When the seconds bar runs along the bottom, lift AM/PM so the two
+      // don't touch.
+      if (!d.hour24 && ov != 2) {
+        int16_t y = (int16_t)(SAFE_Y0 + 38);
+        if (ov == 5) y = (int16_t)(SAFE_Y0 + 28);
+        x_center(c, d.hour < 12 ? "AM" : "PM", 1, y);
+      }
       break;
     }
+
     case X_DATELINE: {
       static const char *const WD[7] =
         { "SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY",
@@ -595,16 +602,15 @@ void extras_face_render(GFXcanvas1 &c, uint8_t w, uint8_t ov, const FaceData &d)
     }
 
     // ---- outside ------------------------------------------------------------
-    // The whole forecast in one panel: the sky as a drawn icon on the left,
-    // and on the right the temperature now, today's high, and the chance of
-    // rain. Units follow the same F/C switch as every other temperature.
+    // The whole forecast, using the whole panel: the condition in words across
+    // the top, the sky drawn on the left, the temperature now in the middle,
+    // today's high and low stacked on the right, and the chance of rain as a
+    // labelled bar along the bottom edge.
     case X_WEATHER: {
       if (!wx_valid) { x_pair(c, "WEATHER", "--", 4); break; }
-      const int16_t ix = SAFE_X0;
-      const int16_t iy = (int16_t)(SAFE_Y0 + 6);
-      wx_icon_draw(c, wx_icon, ix, iy);
+      static const char *const WXN[8] = { "CLEAR", "PARTLY", "CLOUDY", "FOG",
+                                          "DRIZZLE", "RAIN", "SNOW", "STORMS" };
 
-      const int16_t cx = (int16_t)(SAFE_X0 + 40);
       const float now_c = (float)wx_cur_c10 / 10.0f;
       const float max_c = (float)wx_max_c10 / 10.0f;
       const float min_c = (float)wx_min_c10 / 10.0f;
@@ -612,25 +618,49 @@ void extras_face_render(GFXcanvas1 &c, uint8_t w, uint8_t ov, const FaceData &d)
       const int max_t = (int)lroundf(d.temp_f ? max_c * 9.0f / 5.0f + 32.0f : max_c);
       const int min_t = (int)lroundf(d.temp_f ? min_c * 9.0f / 5.0f + 32.0f : min_c);
 
-      // What the sky is doing, in words, above the numbers.
-      static const char *const WXN[8] = { "CLEAR", "PARTLY", "CLOUDY", "FOG",
-                                          "DRIZZLE", "RAIN", "SNOW", "STORMS" };
-      x_text(c, WXN[wx_icon & 7], 1, (int16_t)(SAFE_Y0), cx);
+      // Condition across the top, centred, with a rule under it.
+      x_center(c, WXN[wx_icon & 7], 1, (int16_t)(SAFE_Y0));
+      c.drawFastHLine(SAFE_X0, (int16_t)(SAFE_Y0 + 9), SAFE_W, 1);
 
-      // Now, big.
+      // The sky, drawn, hard left.
+      wx_icon_draw(c, wx_icon, SAFE_X0, (int16_t)(SAFE_Y0 + 12));
+
+      // Now, as big as the panel allows, in the middle band.
       snprintf(b, sizeof b, "%d%c", now_t, (char)0xF8);
-      x_text(c, b, 3, (int16_t)(SAFE_Y0 + 10), cx);
+      {
+        const int16_t w = (int16_t)(strlen(b) * 18 - 3);
+        int16_t x = (int16_t)(SAFE_X0 + 36);
+        if (x + w > SAFE_X0 + SAFE_W - 30) x = (int16_t)(SAFE_X0 + SAFE_W - 30 - w);
+        if (x < SAFE_X0 + 34) x = (int16_t)(SAFE_X0 + 34);
+        x_text(c, b, 3, (int16_t)(SAFE_Y0 + 16), x);
+      }
 
-      // Today's high and low on one line, so both are visible at a glance.
-      snprintf(b, sizeof b, "H%d%c L%d%c", max_t, (char)0xF8, min_t, (char)0xF8);
-      x_text(c, b, 1, (int16_t)(SAFE_Y0 + 34), cx);
+      // Today's high over today's low, right-hand column.
+      {
+        const int16_t rx = (int16_t)(SAFE_X0 + SAFE_W - 30);
+        snprintf(b, sizeof b, "H%d%c", max_t, (char)0xF8);
+        x_text(c, b, 1, (int16_t)(SAFE_Y0 + 16), rx);
+        snprintf(b, sizeof b, "L%d%c", min_t, (char)0xF8);
+        x_text(c, b, 1, (int16_t)(SAFE_Y0 + 28), rx);
+      }
 
-      // Chance of rain, with a bar under it so it reads from across the room.
-      snprintf(b, sizeof b, "RAIN %u%%", (unsigned)wx_pop);
-      x_text(c, b, 1, (int16_t)(SAFE_Y0 + 44), cx);
-      x_bar(c, (int16_t)(SAFE_Y0 + SAFE_H - 5), 5, wx_pop);
+      // Chance of rain: the words on the left of the bottom row, the bar
+      // filling whatever is left of it.
+      {
+        const int16_t by = (int16_t)(SAFE_Y0 + SAFE_H - 9);
+        snprintf(b, sizeof b, "RAIN %u%%", (unsigned)wx_pop);
+        x_text(c, b, 1, (int16_t)(by + 1), SAFE_X0);
+        const int16_t bx = (int16_t)(SAFE_X0 + 50);
+        const int16_t bw = (int16_t)(SAFE_X0 + SAFE_W - bx);
+        if (bw > 8) {
+          c.drawRect(bx, by, bw, 8, 1);
+          const int16_t fw = (int16_t)((int32_t)(bw - 4) * wx_pop / 100);
+          if (fw > 0) c.fillRect((int16_t)(bx + 2), (int16_t)(by + 2), fw, 4, 1);
+        }
+      }
       break;
     }
+
 
     default:
       x_pair(c, "EXTRA", "?", 3);
