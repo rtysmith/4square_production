@@ -59,6 +59,27 @@ void extras_overlay_secbar(GFXcanvas1 &c, int seconds);
 // the radio is down. Shared with faces.cpp like the two above.
 void extras_overlay_wifi(GFXcanvas1 &c);
 
+// The same three corners, but told which edge of the panel to sit on. The
+// overlay byte the editor saves holds two items - low nibble along the bottom,
+// high nibble along the top - which is why every helper takes a "top" flag.
+void extras_overlay_week_at(GFXcanvas1 &c, bool top);
+void extras_overlay_secbar_at(GFXcanvas1 &c, int seconds, bool top);
+void extras_overlay_wifi_at(GFXcanvas1 &c, bool top);
+// Sunrise, sunset or both, drawn small in the bottom (or top) corners.
+void extras_overlay_sun(GFXcanvas1 &c, uint8_t which, bool top);
+// Any overlay at all, including the ones the stock switch has never heard of
+// and the top-edge variants. faces.cpp calls this for an ordinary widget.
+void extras_overlay_full(GFXcanvas1 &c, uint8_t ov, const FaceData &d);
+
+// How the seconds bar is drawn, for the whole clock: 1..4 pixels thick, and
+// hash marks off (0), at the quarters (1) or every ten seconds (2).
+void extras_set_secbar(uint8_t thick, uint8_t ticks);
+uint8_t extras_secbar_thick();
+uint8_t extras_secbar_ticks();
+
+// Today's sunrise and sunset, in minutes past local midnight; -1 for unknown.
+void extras_set_sun(int16_t sunrise_min, int16_t sunset_min);
+
 
 // ---- animations that cross the bezel ---------------------------------------
 // The four panels are treated as one 256x128 canvas. Each panel renders the
@@ -106,6 +127,10 @@ int32_t extras_linkedin_gained();
 void extras_set_weather(uint8_t icon, int16_t cur_c10, int16_t max_c10,
                         int16_t min_c10, uint8_t pop);
 bool extras_weather_valid();
+// Preserve the last successful remote readings across a software reset. A
+// network outage never replaces them with blanks; they remain available while
+// the connection keeper recovers, including outages longer than two hours.
+void extras_cache_restore();
 
 // ---- what the four buttons on the back do ----------------------------------
 // The mapping used to be a hardcoded switch in ui.cpp:
