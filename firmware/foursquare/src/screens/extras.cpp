@@ -164,20 +164,27 @@ void extras_splash_draw(GFXcanvas1 &c) {
       break;
 
     // ---- top right: the network it is trying -------------------------------
+    // "NET <ssid>" on ONE line so the whole name is visible at a glance, and
+    // the address underneath as soon as the router hands one out.
     case 1: {
-      x_center(c, "NETWORK", 1, (int16_t)(SAFE_Y0 + 2));
-      splash_fit(b, sizeof b, webcfg_wifi_target_ssid(), 19);
+      char ss[24];
+      splash_fit(ss, sizeof ss, webcfg_wifi_target_ssid(), 16);
+      snprintf(b, sizeof b, "NET %s", ss);
+      x_center(c, b, 1, (int16_t)(SAFE_Y0 + 2));
+      snprintf(b, sizeof b, "AP %u  TRY %u", (unsigned)webcfg_wifi_network(),
+               (unsigned)webcfg_wifi_attempt());
       x_center(c, b, 1, (int16_t)(SAFE_Y0 + 16));
-      snprintf(b, sizeof b, "SAVED AP %u", (unsigned)webcfg_wifi_network());
+      snprintf(b, sizeof b, "IP %s", online && ui_env.ip[0] ? ui_env.ip : "WAITING");
       x_center(c, b, 1, (int16_t)(SAFE_Y0 + 30));
-      snprintf(b, sizeof b, "ATTEMPT %u", (unsigned)webcfg_wifi_attempt());
-      x_center(c, b, 1, (int16_t)(SAFE_Y0 + 42));
       if (online) {
         snprintf(b, sizeof b, "SIGNAL %d dBm", (int)ui_env.rssi);
-        x_center(c, b, 1, (int16_t)(SAFE_Y0 + 54));
+        x_center(c, b, 1, (int16_t)(SAFE_Y0 + 44));
+      } else {
+        x_center(c, splash_stage_label(stage), 1, (int16_t)(SAFE_Y0 + 44));
       }
       break;
     }
+
 
     // ---- bottom left: what it is doing right now ---------------------------
     case 2:
