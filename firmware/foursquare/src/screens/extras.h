@@ -55,6 +55,9 @@ void extras_overlay_week(GFXcanvas1 &c);
 // The seconds as a filling bar along the bottom edge instead of a ":07" count.
 // Shared with faces.cpp so an ordinary panel can carry it too.
 void extras_overlay_secbar(GFXcanvas1 &c, int seconds);
+// Three little signal bars in the bottom-right corner; a crossed-out stub when
+// the radio is down. Shared with faces.cpp like the two above.
+void extras_overlay_wifi(GFXcanvas1 &c);
 
 
 // ---- animations that cross the bezel ---------------------------------------
