@@ -4,7 +4,8 @@
 #include "leds.h"
 #include "../net/market.h"
 #include "../screens/anim.h"
-#include "../screens/extras.h"   // btn_page_for(): the editable button map
+#include "../screens/extras.h"
+#include "../net/webcfg.h"       // webcfg_factory_reset(): the 20 s MODE hold   // btn_page_for(): the editable button map
 #include <string.h>
 #include <stdio.h>
 
@@ -196,6 +197,10 @@ enum Ev : uint8_t { EV_NONE = 0, EV_SHORT, EV_LONG, EV_REPEAT };
 
 static const uint32_t UI_LONG_MS = 700;
 
+// How long MODE has to stay down for a full reset. Deliberately far past
+// any hold a person makes by accident.
+static const uint32_t UI_RESET_HOLD_MS = 20000;
+
 static Ev poll_btn(uint8_t i, uint32_t now) {
   static const uint8_t PIN[4] = {BTN_MODE, BTN_SET, BTN_UP, BTN_DOWN};
   bool raw = (digitalRead(PIN[i]) == LOW);          // pull-up: LOW = pressed
@@ -256,6 +261,14 @@ static Ev poll_btn(uint8_t i, uint32_t now) {
     led_ack(i);
     return EV_SHORT;
   }
+#ifndef DEMO_BUILD
+  // MODE, still down after twenty seconds: wipe and come back as the
+  // setup access point. This never returns.
+  if (raw && b.down && i == 0 && now - b.t_down >= UI_RESET_HOLD_MS) {
+    webcfg_factory_reset();
+  }
+#endif
+
   if (raw && b.down && i < 2 && !b.long_fired &&
       now - b.t_down >= UI_LONG_MS) {
     b.long_fired = true;
