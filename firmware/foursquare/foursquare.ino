@@ -553,6 +553,7 @@ void loop() {
 
 #ifndef DEMO_BUILD
   webcfg_wifi_keeper_tick();
+    if (webcfg_wifi_online()) webcfg_begin();
 #else
   // ========================================================================
   // DEMO BUILD: THE RADIO IS NEVER BROUGHT UP. See src/demo.h.
