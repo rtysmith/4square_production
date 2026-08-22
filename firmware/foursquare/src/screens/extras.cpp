@@ -66,8 +66,18 @@ static const uint32_t SPLASH_MIN_MS   = 2500u;
 static const uint32_t SPLASH_READY_MS = 10000u;
 static uint32_t splash_ready_at = 0;
 static bool     splash_done = false;
+static uint32_t splash_done_at = 0;
+// The handover: for a few seconds after the boot screen releases, every panel
+// is repainted, otherwise only the panels that normally tick get cleared and
+// the other three keep showing boot text.
+static const uint32_t SPLASH_SWEEP_MS = 3000u;
 
 const char *extras_fw_version() { return FOURSQUARE_FW_VERSION; }
+
+bool extras_splash_sweep() {
+  if (!splash_done || splash_done_at == 0) return false;
+  return (uint32_t)(millis() - splash_done_at) < SPLASH_SWEEP_MS;
+}
 
 bool extras_splash_active() {
   if (splash_done) return false;
@@ -82,6 +92,7 @@ bool extras_splash_active() {
     if (splash_ready_at == 0) splash_ready_at = now;
     if (now - splash_ready_at >= SPLASH_READY_MS && now >= SPLASH_MIN_MS) {
       splash_done = true;
+      splash_done_at = now ? now : 1u;
       return false;
     }
   } else {
