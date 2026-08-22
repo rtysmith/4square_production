@@ -106,8 +106,7 @@ static void wifi_keeper_start_join(uint32_t now, bool reset_radio) {
   const bool have_second = WIFI_SSID2[0] && strcmp(WIFI_SSID, WIFI_SSID2) != 0;
   const char *ssid = wifi_network == 1 && have_second ? WIFI_SSID2 : WIFI_SSID;
   const char *pass = wifi_network == 1 && have_second ? WIFI_PASS2 : WIFI_PASS;
-  Serial.printf("# wifi keeper: joining configured network %u
-", (unsigned)(wifi_network + 1));
+  Serial.printf("# wifi keeper: joining configured network %u\n", (unsigned)(wifi_network + 1));
   WiFi.begin(ssid, pass);
   wifi_joining = true;
   wifi_join_since_ms = now;
@@ -172,8 +171,7 @@ void webcfg_wifi_keeper_tick() {
     // Give the known network three complete attempts before trying its peer.
     if (have_second && (wifi_failures % 3) == 0) wifi_network ^= 1;
     wifi_next_try_ms = now + wifi_retry_delay(wifi_failures);
-    Serial.printf("# wifi keeper: join timed out; retry %u queued
-", (unsigned)wifi_failures);
+    Serial.printf("# wifi keeper: join timed out; retry %u queued\n", (unsigned)wifi_failures);
   }
 
   if ((int32_t)(now - wifi_next_try_ms) < 0) return;
