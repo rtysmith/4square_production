@@ -117,7 +117,7 @@ static void render_clock(GFXcanvas1 &c, uint8_t slot, uint8_t variant,
     if (w >= W_COUNT && !(w >= X_FIRST && w < X_FIRST + X_COUNT))
       w = CLOCK_W[slot & 3];
     uint8_t ov = cfg.slot_overlay[slot & 3];
-    if (ov >= OV_COUNT && ov > 6) ov = CLOCK_OV[slot & 3];
+    if ((ov & 0x0F) > 9 || ((ov >> 4) & 0x0F) > 9) ov = CLOCK_OV[slot & 3];
     // Variant 0 is the saved look; pressing MODE walks the style table as
     // it always did, without touching what each panel is showing.
     uint8_t style = (variant == 0) ? cfg.slot_style[slot & 3]
