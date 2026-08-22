@@ -287,7 +287,7 @@ static void handle_update_result() {
     update_activity_ms = 0;
     disp_all_off(false);
     enableLoopWDT();
-    WiFi.setTxPower(WIFI_POWER_11dBm);
+    WiFi.setTxPower(WIFI_POWER_17dBm);
     send_json(500, "{\"ok\":false,\"error\":\"the image was rejected\"}");
     return;
   }
@@ -334,7 +334,7 @@ static void handle_update_data() {
     update_failed = true;
     disp_all_off(false);
     enableLoopWDT();
-    WiFi.setTxPower(WIFI_POWER_11dBm);
+    WiFi.setTxPower(WIFI_POWER_17dBm);
   }
 }
 
@@ -425,10 +425,12 @@ static void linkedin_tick() {
 
   WiFiClientSecure tls;
   tls.setInsecure();
-  tls.setTimeout(6);
+  // The app has to ask a third party for the weekly figure, so this read is
+  // slower than the forecast. Six seconds was cutting it off every time.
+  tls.setTimeout(15);
   HTTPClient http;
   if (!http.begin(tls, LINKEDIN_URL)) return;
-  http.setTimeout(6000);
+  http.setTimeout(15000);
   const int code = http.GET();
   if (code == 200) {
     const String body = http.getString();
@@ -502,7 +504,7 @@ void webcfg_tick() {
     update_activity_ms = 0;
     disp_all_off(false);
     enableLoopWDT();
-    WiFi.setTxPower(WIFI_POWER_11dBm);
+    WiFi.setTxPower(WIFI_POWER_17dBm);
   }
 
   // The rolling history behind the trend and high/low screens. Cheap, and it
