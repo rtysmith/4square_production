@@ -542,6 +542,13 @@ static void cors() {
   server.sendHeader("Access-Control-Allow-Origin", "*");
   server.sendHeader("Access-Control-Allow-Headers", "*");
   server.sendHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  // PRIVATE NETWORK ACCESS: allowing "insecure content" is not enough on its
+  // own. A page on the public internet reaching a device on your own LAN is a
+  // second, separate check in Chrome, and it is refused unless the device
+  // itself says yes with these headers on the preflight.
+  server.sendHeader("Access-Control-Allow-Private-Network", "true");
+  server.sendHeader("Access-Control-Allow-Local-Network", "true");
+  server.sendHeader("Access-Control-Max-Age", "600");
 }
 
 static void send_json(int code, const char *body) {
@@ -558,13 +565,14 @@ static uint8_t arg_u8(const char *name, uint8_t fallback, uint8_t hi) {
 }
 
 static void handle_status() {
-  char body[1216];
+  char body[1320];
   snprintf(body, sizeof body,
     "{\"firmware\":\"4square\",\"build_id\":\"%s\",\"version\":\"%s\",\"api\":%d,\"ip\":\"%s\",\"ssid\":\"%s\","
     "\"rssi\":%d,\"wifi_recoveries\":%lu,\"last_outage_s\":%lu,"
     "\"wifi_stage\":%u,\"wifi_progress\":%u,\"wifi_attempt\":%u,\"wifi_network\":%u,\"wifi_failure\":%u,"
     "\"uptime_s\":%lu,\"temp_c10\":%d,\"humidity\":%u,"
     "\"extras\":1,\"wide\":%d,\"linkedin\":{\"valid\":%s,\"followers\":%ld,\"gained7d\":%ld},"
+    "\"feeds\":{\"linkedin\":\"%s\",\"weather\":\"%s\"},"
     "\"hour24\":%u,\"temp_f\":%u,\"page\":%u,"
     "\"buttons\":[%u,%u,%u,%u],"
     "\"leds\":{\"mode\":%u,\"bright\":%u},"
@@ -586,6 +594,7 @@ static void handle_status() {
     extras_wide_pinned(),
     extras_linkedin_valid() ? "true" : "false",
     (long)extras_linkedin_followers(), (long)extras_linkedin_gained(),
+    extras_feed_reason(0), extras_feed_reason(1),
     (unsigned)cfg.hour24, (unsigned)cfg.temp_unit, (unsigned)ui_page(),
     (unsigned)btn_page_for(0), (unsigned)btn_page_for(1),
     (unsigned)btn_page_for(2), (unsigned)btn_page_for(3),
@@ -1017,12 +1026,25 @@ static long json_long(const String &body, const char *key, bool *found) {
   return body.substring(at + (int)strlen(key)).toInt();
 }
 
+// "STARTING" must never be the last word a panel says. Whenever a feed is
+// simply waiting for its next slot, print how long that wait is, so a stuck
+// timer looks different from a stuck fetch.
+static void note_wait(uint8_t which, uint32_t now, uint32_t due) {
+  const int32_t left = (int32_t)(due - now);
+  char t[18];
+  if (left <= 0)           snprintf(t, sizeof t, "FETCHING");
+  else if (left < 90000)   snprintf(t, sizeof t, "RETRY %ds", (int)(left / 1000));
+  else                     snprintf(t, sizeof t, "RETRY %dm", (int)(left / 60000));
+  extras_feed_note(which, t);
+}
+
 static void linkedin_tick() {
   if (updating) return;
   const uint32_t now = millis();
   if (!remote_read_ready(now, 0)) return;
-  if ((int32_t)(now - li_next_ms) < 0) return;
+  if ((int32_t)(now - li_next_ms) < 0) { note_wait(0, now, li_next_ms); return; }
   li_next_ms = now + 15u * 60u * 1000u;
+  extras_feed_note(0, "FETCHING");
   if (!host_resolves(0) || !enough_heap(0)) { li_next_ms = now + 30000u; return; }
 
   WiFiClientSecure tls;
@@ -1083,8 +1105,9 @@ static void weather_tick() {
   if (updating) return;
   const uint32_t now = millis();
   if (!remote_read_ready(now, 1)) return;
-  if ((int32_t)(now - wx_next_ms) < 0) return;
+  if ((int32_t)(now - wx_next_ms) < 0) { note_wait(1, now, wx_next_ms); return; }
   wx_next_ms = now + 20u * 60u * 1000u;
+  extras_feed_note(1, "FETCHING");
   if (!host_resolves(1) || !enough_heap(1)) { wx_next_ms = now + 30000u; return; }
 
   WiFiClientSecure tls;
