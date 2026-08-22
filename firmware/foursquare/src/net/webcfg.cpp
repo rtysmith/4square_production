@@ -67,6 +67,7 @@ static uint8_t    wifi_network       = 0;
 static uint8_t    wifi_failures      = 0;
 static uint32_t   wifi_down_since_ms = 0;
 static uint32_t   wifi_join_since_ms = 0;
+static uint32_t   wifi_dhcp_since_ms = 0;
 static uint32_t   wifi_next_try_ms   = 0;
 static uint32_t   wifi_last_up_ms    = 0;
 static uint32_t   wifi_stable_since_ms = 0;
@@ -76,6 +77,7 @@ static uint32_t   wifi_last_outage_s = 0;
 
 static const uint32_t WIFI_LOSS_GRACE_MS = 12000u;
 static const uint32_t WIFI_JOIN_LIMIT_MS = 25000u;
+static const uint32_t WIFI_DHCP_LIMIT_MS = 15000u;
 static const uint32_t WIFI_RADIO_RESET_MS = 10u * 60u * 1000u;
 
 static uint32_t wifi_retry_delay(uint8_t failures) {
@@ -124,13 +126,21 @@ void webcfg_wifi_keeper_tick() {
   const uint32_t now = millis();
   const wl_status_t status = WiFi.status();
 
-  if (status == WL_CONNECTED) {
+  // ASSOCIATED IS NOT ONLINE. The radio can sit at WL_CONNECTED with an
+  // address of 0.0.0.0 when the router's DHCP handshake is lost - the clock
+  // says "Wi-Fi connected" while nothing on the network can reach it. Treat a
+  // missing lease as a failed join: wait a short while for DHCP, then rejoin
+  // (which restarts the lease request) rather than sitting there forever.
+  const bool have_lease = (uint32_t)WiFi.localIP() != 0u;
+
+  if (status == WL_CONNECTED && have_lease) {
     const bool newly_up = !wifi_seen_up;
     const uint32_t outage_ms = wifi_down_since_ms ? (uint32_t)(now - wifi_down_since_ms) : 0;
     wifi_seen_up = true;
     wifi_joining = false;
     wifi_failures = 0;
     wifi_down_since_ms = 0;
+    wifi_dhcp_since_ms = 0;
     wifi_last_up_ms = now;
     ui_env.wifi_up = true;
     ui_env.rssi = WiFi.RSSI();
@@ -153,6 +163,28 @@ void webcfg_wifi_keeper_tick() {
     }
     return;
   }
+
+  if (status == WL_CONNECTED && !have_lease) {
+    // Associated, waiting on the address. Give DHCP a fair window, then drop
+    // the association so the next join asks for a lease from scratch.
+    if (wifi_dhcp_since_ms == 0) wifi_dhcp_since_ms = now == 0 ? 1 : now;
+    ui_env.wifi_up = false;
+    ui_env.ota_ready = false;
+    wifi_stable_since_ms = 0;
+    if (wifi_down_since_ms == 0) wifi_down_since_ms = now == 0 ? 1 : now;
+    if ((uint32_t)(now - wifi_dhcp_since_ms) < WIFI_DHCP_LIMIT_MS) return;
+    Serial.println("# wifi keeper: associated but no DHCP lease; rejoining");
+    wifi_dhcp_since_ms = 0;
+    wifi_seen_up = false;
+    wifi_joining = false;
+    if (wifi_failures < 250) wifi_failures++;
+    // A stuck lease is usually the router's DHCP table, not the radio, so a
+    // plain rejoin comes first; the radio reset still happens after 6 failures.
+    wifi_keeper_start_join(now, wifi_failures >= 6);
+    return;
+  }
+  wifi_dhcp_since_ms = 0;
+
 
   ui_env.wifi_up = false;
   ui_env.ota_ready = false;
@@ -594,7 +626,8 @@ static bool wifi_ready_for_remote_read(uint32_t now) {
   // synchronous DNS+TLS transaction in that window was the remaining route to
   // a watchdog reset shortly after boot. Keep rendering cached data and wait
   // for one uninterrupted minute of connectivity first.
-  return WiFi.status() == WL_CONNECTED && wifi_stable_since_ms != 0 &&
+  return WiFi.status() == WL_CONNECTED && (uint32_t)WiFi.localIP() != 0u &&
+         wifi_stable_since_ms != 0 &&
          (uint32_t)(now - wifi_stable_since_ms) >= 60000u;
 }
 
