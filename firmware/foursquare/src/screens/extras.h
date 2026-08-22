@@ -53,6 +53,9 @@ const char *extras_widget_name(uint8_t w);
 // It is drawn from face_render() so it covers all four panels no matter what
 // layout is saved, and it costs nothing once the timer has run out.
 bool extras_splash_active();
+/** True for a moment after the boot screen lets go, so every panel — not just
+ *  the ones that normally tick — gets repainted with the real layout. */
+bool extras_splash_sweep();
 void extras_splash_draw(GFXcanvas1 &c);
 /** The version string the image was stamped with, e.g. "v15.7". */
 const char *extras_fw_version();
