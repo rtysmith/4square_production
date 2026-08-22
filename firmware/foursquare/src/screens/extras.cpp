@@ -127,6 +127,7 @@ static const char *splash_stage_label(uint8_t stage) {
   if (stage == 3) return "GET IP";
   if (stage == 4) return "RETRY";
   if (stage == 6) return "SCANNING";
+  if (stage == 7) return "SETUP AP";
   return "RADIO RST";
 }
 
@@ -161,6 +162,43 @@ void extras_splash_draw(GFXcanvas1 &c) {
   const uint32_t now  = millis();
   const uint32_t secs = now / 1000u;
   const uint8_t  slot = splash_next_slot();
+
+  // ---- SETUP MODE: no network is saved (or three joins failed) -------------
+  // The four panels stop reporting a join that is not happening and become
+  // the instructions for handing the clock a network from a phone.
+  if (webcfg_wifi_portal()) {
+    switch (slot) {
+      case 0:
+        x_center(c, "WIFI", 2, (int16_t)(SAFE_Y0 + 6));
+        x_center(c, "SETUP", 2, (int16_t)(SAFE_Y0 + 26));
+        x_center(c, FOURSQUARE_FW_VERSION, 1, (int16_t)(SAFE_Y0 + 50));
+        break;
+      case 1: {
+        char ss[24];
+        splash_fit(ss, sizeof ss, webcfg_portal_ssid(), 18);
+        x_center(c, "1 JOIN WIFI", 1, (int16_t)(SAFE_Y0 + 6));
+        x_center(c, ss, 1, (int16_t)(SAFE_Y0 + 24));
+        x_center(c, "NO PASSWORD", 1, (int16_t)(SAFE_Y0 + 42));
+        break;
+      }
+      case 2: {
+        char ip[24];
+        splash_fit(ip, sizeof ip, webcfg_portal_ip(), 18);
+        x_center(c, "2 OPEN", 1, (int16_t)(SAFE_Y0 + 6));
+        x_center(c, ip, 1, (int16_t)(SAFE_Y0 + 24));
+        x_center(c, "IN A BROWSER", 1, (int16_t)(SAFE_Y0 + 42));
+        break;
+      }
+      default:
+        x_center(c, "3 ENTER YOUR", 1, (int16_t)(SAFE_Y0 + 4));
+        x_center(c, "NETWORK", 1, (int16_t)(SAFE_Y0 + 18));
+        x_center(c, "IT RESTARTS", 1, (int16_t)(SAFE_Y0 + 34));
+        x_center(c, "AND JOINS", 1, (int16_t)(SAFE_Y0 + 48));
+        break;
+    }
+    return;
+  }
+
   const uint8_t  stage = webcfg_wifi_stage();
   const bool     online = webcfg_wifi_online();
   const char    *failed = splash_fail_label(webcfg_wifi_failure());
@@ -610,6 +648,16 @@ static void draw_wifi(GFXcanvas1 &c) {
     else if (stage == 3) label = "REQUESTING IP";
     else if (stage == 4) label = "WAITING TO RETRY";
     else if (stage == 6) label = "SCANNING NETWORKS";
+    else if (stage == 7) label = "SETUP MODE";
+    if (stage == 7) {
+      char j[24];
+      x_center(c, "WIFI SETUP", 1, (int16_t)(SAFE_Y0 + 1));
+      snprintf(j, sizeof j, "JOIN %s", webcfg_portal_ssid());
+      x_center(c, j, 1, (int16_t)(SAFE_Y0 + 15));
+      x_center(c, "THEN OPEN", 1, (int16_t)(SAFE_Y0 + 29));
+      x_center(c, webcfg_portal_ip(), 1, (int16_t)(SAFE_Y0 + 43));
+      return;
+    }
     const char *failed = "NO FAILURE YET";
     if (failure == 1) failed = "FAILED: NOT FOUND";
     else if (failure == 2) failed = "FAILED: PASSWORD";
