@@ -33,6 +33,18 @@ const char *webcfg_wifi_target_ssid();
 // 3 join timeout, 4 DHCP supplied no address, 5 radio unresponsive.
 uint8_t webcfg_wifi_failure();
 
+// SETUP MODE. With no saved network — or after three failed joins from a cold
+// boot — the clock stops being a station and becomes its own access point so a
+// phone or laptop can hand it credentials. Stage 7 means "setup access point".
+bool webcfg_wifi_portal();
+const char *webcfg_portal_ssid();
+const char *webcfg_portal_ip();
+
+// FULL RESET. Wipes saved Wi-Fi credentials and every setting, then reboots
+// into the setup access point. The top-left MODE button held for twenty
+// seconds calls this; nothing else does.
+void webcfg_factory_reset();
+
 // True while an HTTP firmware upload is in flight, so the main loop can leave
 // the screens and the I2C bus alone.
 bool webcfg_updating();
