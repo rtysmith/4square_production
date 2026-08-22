@@ -125,6 +125,10 @@ uint8_t webcfg_wifi_progress() {
 
 uint8_t webcfg_wifi_attempt() { return (uint8_t)(wifi_failures + 1u); }
 uint8_t webcfg_wifi_network() { return (uint8_t)(wifi_network + 1u); }
+const char *webcfg_wifi_target_ssid() {
+  const bool have_second = WIFI_SSID2[0] && strcmp(WIFI_SSID, WIFI_SSID2) != 0;
+  return (wifi_network == 1 && have_second) ? WIFI_SSID2 : WIFI_SSID;
+}
 uint8_t webcfg_wifi_failure() { return wifi_last_failure; }
 
 static void wifi_keeper_start_join(uint32_t now, bool reset_radio) {
