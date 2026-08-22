@@ -21,6 +21,9 @@ void webcfg_wifi_keeper_tick();
 // 0 live, 1 checking a brief loss, 2 joining, 3 requesting an IP address,
 // 4 waiting to retry, 5 resetting the radio.
 uint8_t webcfg_wifi_stage();
+// True only when the clock is associated AND holds an IP address, i.e. other
+// machines on the network can actually reach it.
+bool webcfg_wifi_online();
 uint8_t webcfg_wifi_progress();
 uint8_t webcfg_wifi_attempt();
 uint8_t webcfg_wifi_network();
