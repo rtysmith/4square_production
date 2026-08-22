@@ -46,6 +46,11 @@ static bool       started  = false;
 static bool       updating = false;
 static bool       update_failed = false;
 static uint32_t   update_activity_ms = 0;
+// Bytes actually handed to Update.write(), and whether Update.end() accepted
+// the finished image. Both are reported back to the browser so "the upload
+// finished" can never be mistaken for "the new firmware is installed".
+static uint32_t   update_written = 0;
+static bool       update_finalized = false;
 static const uint32_t UPDATE_STALL_MS = 30000;
 
 bool webcfg_updating() { return updating; }
@@ -120,9 +125,9 @@ static void handle_layout() {
     cfg.slot_widget[i]  = arg_u8(names[0], cfg.slot_widget[i],
                                  (uint8_t)(X_FIRST + X_COUNT - 1));
     cfg.slot_style[i]   = arg_u8(names[1], cfg.slot_style[i],   0x7F);
-    // 4 is OV_LIWEEK (the weekly LinkedIn gain, bottom-left) and 5 is the
-    // seconds bar; both live past the stock overlay enum, so the ceiling is 5.
-    cfg.slot_overlay[i] = arg_u8(names[2], cfg.slot_overlay[i], 5);
+    // 4 is OV_LIWEEK (the weekly LinkedIn gain, bottom-left), 5 is the seconds
+    // bar and 6 the Wi-Fi bars; all live past the stock overlay enum.
+    cfg.slot_overlay[i] = arg_u8(names[2], cfg.slot_overlay[i], 6);
   }
   if (server.hasArg("hour24")) cfg.hour24    = arg_u8("hour24", cfg.hour24, 1);
   if (server.hasArg("tempf"))  cfg.temp_unit = arg_u8("tempf",  cfg.temp_unit, 1);
@@ -280,18 +285,42 @@ static bool update_authorized() {
   return diff == 0;
 }
 
+// THE BUG THIS EXISTS TO KILL: a partial upload used to answer 200 and
+// reboot. Update.end() failing was only printed to the serial port, and a
+// transfer that never delivered a single byte left every flag untouched — so
+// the browser was told "installed" while the clock came back on the OLD image.
+// Now the only path to a reboot is: authorised, begun, bytes written, and
+// Update.end() accepted the image. Everything else is a 500 with the reason.
+static void update_stand_down() {
+  Update.abort();
+  updating = false;
+  update_activity_ms = 0;
+  disp_all_off(false);
+  enableLoopWDT();
+  WiFi.setTxPower(WIFI_POWER_17dBm);
+}
+
 static void handle_update_result() {
-  if (Update.hasError() || update_failed) {
-    Update.abort();
-    updating = false;
-    update_activity_ms = 0;
-    disp_all_off(false);
-    enableLoopWDT();
-    WiFi.setTxPower(WIFI_POWER_17dBm);
-    send_json(500, "{\"ok\":false,\"error\":\"the image was rejected\"}");
+  const char *why = 0;
+  if (update_failed || Update.hasError())      why = "the board rejected the image";
+  else if (!updating)                          why = "no firmware data arrived";
+  else if (update_written == 0)                why = "the upload was empty";
+  else if (!update_finalized)                  why = "the image was cut short before the end";
+
+  if (why) {
+    update_stand_down();
+    char body[192];
+    snprintf(body, sizeof body,
+             "{\"ok\":false,\"written\":%lu,\"error\":\"%s\"}",
+             (unsigned long)update_written, why);
+    send_json(500, body);
     return;
   }
-  send_json(200, "{\"ok\":true,\"rebooting\":true}");
+  char body[128];
+  snprintf(body, sizeof body,
+           "{\"ok\":true,\"written\":%lu,\"rebooting\":true}",
+           (unsigned long)update_written);
+  send_json(200, body);
   delay(250);
   ESP.restart();
 }
@@ -302,6 +331,8 @@ static void handle_update_data() {
     if (!update_authorized()) return;              // the POST handler answers 401
     updating = true;
     update_failed = false;
+    update_written = 0;
+    update_finalized = false;
     update_activity_ms = millis();
     Serial.printf("# http update start: %s\n", up.filename.c_str());
     // Same three precautions the ArduinoOTA path takes, for the same measured
@@ -322,19 +353,21 @@ static void handle_update_data() {
       update_failed = true;
       Update.abort();
       Update.printError(Serial);
+    } else {
+      update_written += up.currentSize;
     }
   } else if (up.status == UPLOAD_FILE_END) {
-    if (!updating) return;
-    if (Update.end(true)) Serial.printf("# http update ok: %u bytes\n", up.totalSize);
-    else                  Update.printError(Serial);
+    if (!updating || update_failed) return;
+    if (Update.end(true)) {
+      update_finalized = true;
+      Serial.printf("# http update ok: %u bytes\n", up.totalSize);
+    } else {
+      update_failed = true;
+      Update.printError(Serial);
+    }
   } else if (up.status == UPLOAD_FILE_ABORTED) {
-    Update.abort();
-    updating = false;
-    update_activity_ms = 0;
     update_failed = true;
-    disp_all_off(false);
-    enableLoopWDT();
-    WiFi.setTxPower(WIFI_POWER_17dBm);
+    update_stand_down();
   }
 }
 
