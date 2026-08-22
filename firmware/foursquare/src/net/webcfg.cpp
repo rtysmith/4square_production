@@ -20,6 +20,8 @@
 
 #ifndef DEMO_BUILD
 #include <WiFi.h>
+#include <esp_netif.h>
+
 #include <ESPmDNS.h>
 #include <WebServer.h>
 #include <HTTPClient.h>
@@ -83,23 +85,134 @@ static uint32_t   wifi_recoveries    = 0;
 static uint32_t   wifi_last_outage_s = 0;
 static uint8_t    wifi_last_failure  = 0;
 
-static const uint32_t WIFI_LOSS_GRACE_MS = 12000u;
-static const uint32_t WIFI_JOIN_LIMIT_MS = 25000u;
-static const uint32_t WIFI_DHCP_LIMIT_MS = 15000u;
-static const uint32_t WIFI_RADIO_RESET_MS = 10u * 60u * 1000u;
+// A wobble is a wobble for four seconds, not twelve: the old grace period was
+// long enough that a real drop cost a quarter of a minute before anything even
+// started. The join and DHCP windows are what the ESP driver actually needs —
+// a join that has not completed in 12s will not complete, and a lease that has
+// not arrived in 8s is a router that wants to be asked again.
+static const uint32_t WIFI_LOSS_GRACE_MS  = 4000u;
+static const uint32_t WIFI_JOIN_LIMIT_MS  = 12000u;
+static const uint32_t WIFI_DHCP_LIMIT_MS  = 8000u;
+static const uint32_t WIFI_RADIO_RESET_MS = 5u * 60u * 1000u;
+// The keeper is a state machine, not a poll loop: four times a second is more
+// than enough and leaves the main loop to the displays.
+static const uint32_t WIFI_TICK_MS = 250u;
+
+// The AP we were last actually online through. Re-joining with the known BSSID
+// and channel skips the full scan, which is the single biggest cost in a
+// reconnect — seconds become hundreds of milliseconds. Cleared after two
+// failed attempts so a moved or rebooted AP is still found the slow way.
+static uint8_t  wifi_last_bssid[6] = {0};
+static int32_t  wifi_last_channel  = 0;
+static bool     wifi_have_bssid    = false;
+static uint8_t  wifi_dhcp_retries  = 0;
+
+// A scan answers "is this network even here?" in about two seconds for BOTH
+// SSIDs at once. Blind-joining a network that is not on the air costs the full
+// join window per attempt, which is why being away from network 1 used to add
+// a minute of dead time before network 2 was ever tried.
+static const uint32_t WIFI_SCAN_FRESH_MS   = 30000u;
+static const uint32_t WIFI_SCAN_LIMIT_MS   = 6000u;
+static bool     wifi_scanning       = false;
+static uint32_t wifi_scan_started_ms = 0;
+static uint32_t wifi_scan_done_ms    = 0;
+static bool     wifi_net_seen[2]     = {false, false};
+static int32_t  wifi_net_rssi[2]     = {0, 0};
+static int32_t  wifi_net_chan[2]     = {0, 0};
+static uint8_t  wifi_net_bssid[2][6] = {{0}, {0}};
+
+// Stop and restart the station's DHCP client so the next association starts a
+// clean DISCOVER/OFFER exchange. This is the reliable way to clear a stale or
+// half-finished lease; WiFi.config() sentinels behave differently per core.
+static void wifi_force_dhcp() {
+  esp_netif_t *sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+  if (!sta) return;
+  esp_netif_dhcpc_stop(sta);
+  esp_netif_dhcpc_start(sta);
+}
 
 static uint32_t wifi_retry_delay(uint8_t failures) {
-  if (failures < 2) return 5000u;
-  if (failures < 4) return 10000u;
-  if (failures < 8) return 30000u;
-  return 60000u;
+
+  if (failures < 2) return 2000u;
+  if (failures < 4) return 5000u;
+  if (failures < 8) return 15000u;
+  return 30000u;
+}
+
+static bool wifi_scan_fresh(uint32_t now) {
+  return wifi_scan_done_ms && (uint32_t)(now - wifi_scan_done_ms) < WIFI_SCAN_FRESH_MS;
+}
+
+static void wifi_scan_begin(uint32_t now) {
+  WiFi.mode(WIFI_STA);
+  WiFi.scanDelete();
+  WiFi.scanNetworks(true, false);
+  wifi_scanning = true;
+  wifi_scan_started_ms = now == 0 ? 1 : now;
+  Serial.println("# wifi keeper: scanning for saved networks");
+}
+
+// Returns true once the scan is finished (or gave up) and results are usable.
+static bool wifi_scan_poll(uint32_t now) {
+  const int n = WiFi.scanComplete();
+  if (n >= 0) {
+    const bool have_second = WIFI_SSID2[0] && strcmp(WIFI_SSID, WIFI_SSID2) != 0;
+    wifi_net_seen[0] = wifi_net_seen[1] = false;
+    for (int i = 0; i < n; i++) {
+      const String s = WiFi.SSID(i);
+      int slot = -1;
+      if (s == WIFI_SSID) slot = 0;
+      else if (have_second && s == WIFI_SSID2) slot = 1;
+      if (slot < 0) continue;
+      const int32_t rssi = WiFi.RSSI(i);
+      if (wifi_net_seen[slot] && rssi <= wifi_net_rssi[slot]) continue;
+      wifi_net_seen[slot] = true;
+      wifi_net_rssi[slot] = rssi;
+      wifi_net_chan[slot] = WiFi.channel(i);
+      if (const uint8_t *b = WiFi.BSSID(i)) memcpy(wifi_net_bssid[slot], b, 6);
+    }
+    Serial.printf("# wifi keeper: scan done - net1 %s, net2 %s\n",
+                  wifi_net_seen[0] ? "present" : "absent",
+                  wifi_net_seen[1] ? "present" : "absent");
+    WiFi.scanDelete();
+    wifi_scanning = false;
+    wifi_scan_done_ms = now == 0 ? 1 : now;
+    return true;
+  }
+  if (n == WIFI_SCAN_FAILED || (uint32_t)(now - wifi_scan_started_ms) >= WIFI_SCAN_LIMIT_MS) {
+    WiFi.scanDelete();
+    wifi_scanning = false;
+    wifi_scan_done_ms = 0;  // unknown: fall back to blind joining
+    return true;
+  }
+  return false;
+}
+
+// Point wifi_network at whichever saved SSID the last scan actually saw; when
+// both are on the air the stronger one wins.
+static void wifi_pick_from_scan(uint32_t now) {
+  if (!wifi_scan_fresh(now)) return;
+  const bool have_second = WIFI_SSID2[0] && strcmp(WIFI_SSID, WIFI_SSID2) != 0;
+  if (!have_second) { wifi_network = 0; return; }
+  if (wifi_net_seen[0] && wifi_net_seen[1]) {
+    wifi_network = wifi_net_rssi[1] > wifi_net_rssi[0] ? 1 : 0;
+  } else if (wifi_net_seen[0]) {
+    wifi_network = 0;
+  } else if (wifi_net_seen[1]) {
+    wifi_network = 1;
+  }
+}
+
+bool webcfg_wifi_online() {
+  return WiFi.status() == WL_CONNECTED && (uint32_t)WiFi.localIP() != 0u;
 }
 
 uint8_t webcfg_wifi_stage() {
   const uint32_t now = millis();
-  if (WiFi.status() == WL_CONNECTED && (uint32_t)WiFi.localIP() != 0u) return 0;
+  if (webcfg_wifi_online()) return 0;
   if (WiFi.status() == WL_CONNECTED) return 3;
   if (wifi_joining) return 2;
+  if (wifi_scanning) return 6;
   if (wifi_seen_up && (uint32_t)(now - wifi_last_up_ms) < WIFI_LOSS_GRACE_MS) return 1;
   if ((int32_t)(wifi_next_try_ms - now) > 0) return 4;
   return 5;
@@ -117,6 +230,7 @@ uint8_t webcfg_wifi_progress() {
       elapsed = now - wifi_retry_started_ms;
       span = wifi_next_try_ms - wifi_retry_started_ms;
       break;
+    case 6: elapsed = now - wifi_scan_started_ms; span = WIFI_SCAN_LIMIT_MS; break;
     default: return 5;
   }
   if (elapsed >= span) return 100;
@@ -149,14 +263,37 @@ static void wifi_keeper_start_join(uint32_t now, bool reset_radio) {
   WiFi.setSleep(false);
   WiFi.setAutoReconnect(false);
   WiFi.setTxPower(WIFI_POWER_17dBm);
-  // Clear a stale station address and force a fresh DHCP exchange.
-  WiFi.config(INADDR_NONE, INADDR_NONE, INADDR_NONE);
+  // Some routers refuse a DHCP request with an empty client hostname.
+  WiFi.setHostname("foursquare-revo");
+  // Clear a stale station address and restart the DHCP client for real. Calling
+  // WiFi.config() with INADDR_NONE is core-version dependent and on some builds
+  // leaves the station with a bogus static address, which is exactly the
+  // "associated, 0.0.0.0 forever" symptom - so drive esp_netif directly.
+  wifi_force_dhcp();
+
 
   const bool have_second = WIFI_SSID2[0] && strcmp(WIFI_SSID, WIFI_SSID2) != 0;
   const char *ssid = wifi_network == 1 && have_second ? WIFI_SSID2 : WIFI_SSID;
   const char *pass = wifi_network == 1 && have_second ? WIFI_PASS2 : WIFI_PASS;
-  Serial.printf("# wifi keeper: joining configured network %u\n", (unsigned)(wifi_network + 1));
-  WiFi.begin(ssid, pass);
+  wifi_dhcp_retries = 0;
+  if (reset_radio) wifi_have_bssid = false;
+  const uint8_t slot = (wifi_network == 1 && have_second) ? 1 : 0;
+  if (wifi_have_bssid && wifi_failures < 2) {
+    Serial.printf("# wifi keeper: fast rejoin to network %u on channel %d\n",
+                  (unsigned)(wifi_network + 1), (int)wifi_last_channel);
+    WiFi.begin(ssid, pass, wifi_last_channel, wifi_last_bssid, true);
+  } else if (wifi_scan_fresh(now) && wifi_net_seen[slot]) {
+    // The scan just told us the exact radio and channel: join it directly and
+    // skip the driver's own full-band scan.
+    Serial.printf("# wifi keeper: joining network %u from scan (ch %d, %d dBm)\n",
+                  (unsigned)(wifi_network + 1), (int)wifi_net_chan[slot],
+                  (int)wifi_net_rssi[slot]);
+    WiFi.begin(ssid, pass, wifi_net_chan[slot], wifi_net_bssid[slot], true);
+  } else {
+    wifi_have_bssid = false;
+    Serial.printf("# wifi keeper: joining configured network %u\n", (unsigned)(wifi_network + 1));
+    WiFi.begin(ssid, pass);
+  }
   wifi_joining = true;
   wifi_join_since_ms = now;
 }
@@ -171,7 +308,13 @@ void webcfg_wifi_keeper_tick() {
     extras_cache_restore();
   }
   const uint32_t now = millis();
+  // Rate limit: the driver's state does not change faster than this and the
+  // panels want the cycles more than the radio does.
+  static uint32_t last_tick_ms = 0;
+  if (last_tick_ms && (uint32_t)(now - last_tick_ms) < WIFI_TICK_MS) return;
+  last_tick_ms = now == 0 ? 1 : now;
   const wl_status_t status = WiFi.status();
+
 
   // ASSOCIATED IS NOT ONLINE. The radio can sit at WL_CONNECTED with an
   // address of 0.0.0.0 when the router's DHCP handshake is lost - the clock
@@ -200,6 +343,13 @@ void webcfg_wifi_keeper_tick() {
       }
       Serial.print("# wifi keeper: online at ");
       Serial.println(WiFi.localIP());
+      // Remember exactly which radio we are talking to so the next reconnect
+      // can skip the scan entirely.
+      if (const uint8_t *bssid = WiFi.BSSID()) {
+        memcpy(wifi_last_bssid, bssid, 6);
+        wifi_last_channel = WiFi.channel();
+        wifi_have_bssid = true;
+      }
       led_hold(LED_WIFI_JOINING, false);
       // mDNS can lose its netif when the radio is recycled. Rebind it on every
       // recovered association so foursquare-revo.local remains dependable.
@@ -221,20 +371,35 @@ void webcfg_wifi_keeper_tick() {
     wifi_stable_since_ms = 0;
     if (wifi_down_since_ms == 0) wifi_down_since_ms = now == 0 ? 1 : now;
     if ((uint32_t)(now - wifi_dhcp_since_ms) < WIFI_DHCP_LIMIT_MS) return;
-    Serial.println("# wifi keeper: associated but no DHCP lease; rejoining");
     wifi_last_failure = 4;
     wifi_dhcp_since_ms = 0;
+    // Ask again before tearing anything down. Most "associated, 0.0.0.0"
+    // stalls are one lost DISCOVER packet, and a reconnect restarts the whole
+    // DHCP exchange on the same AP in about a second - far cheaper than a
+    // rejoin, and far cheaper than a reboot.
+    if (wifi_dhcp_retries < 2) {
+      wifi_dhcp_retries++;
+      Serial.printf("# wifi keeper: no lease yet; re-asking DHCP (%u)\n",
+                    (unsigned)wifi_dhcp_retries);
+      wifi_force_dhcp();
+      WiFi.reconnect();
+      wifi_join_since_ms = now;
+      return;
+    }
+    Serial.println("# wifi keeper: associated but no DHCP lease; rejoining");
     wifi_seen_up = false;
     wifi_joining = false;
+    wifi_have_bssid = false;  // this AP hands out associations but no leases
     if (wifi_failures < 250) wifi_failures++;
     const bool have_second = WIFI_SSID2[0] && strcmp(WIFI_SSID, WIFI_SSID2) != 0;
-    if (have_second && (wifi_failures % 3) == 0) wifi_network ^= 1;
+    if (have_second && (wifi_failures % 2) == 0) wifi_network ^= 1;
     // A stuck lease is usually the router's DHCP table, not the radio, so a
-    // plain rejoin comes first; the radio reset still happens after 6 failures.
-    wifi_keeper_start_join(now, wifi_failures >= 6);
+    // plain rejoin comes first; the radio reset still happens after 4 failures.
+    wifi_keeper_start_join(now, wifi_failures >= 4);
     return;
   }
   wifi_dhcp_since_ms = 0;
+  wifi_dhcp_retries = 0;
 
 
   ui_env.wifi_up = false;
@@ -247,25 +412,47 @@ void webcfg_wifi_keeper_tick() {
   wifi_seen_up = false;
 
   if (wifi_joining) {
-    if ((uint32_t)(now - wifi_join_since_ms) < WIFI_JOIN_LIMIT_MS) return;
+    // Do not sit out the whole join window when the driver has already given a
+    // verdict: "no such network" and "rejected" are final answers.
+    const bool dead = (status == WL_NO_SSID_AVAIL || status == WL_CONNECT_FAILED);
+    if (!dead && (uint32_t)(now - wifi_join_since_ms) < WIFI_JOIN_LIMIT_MS) return;
     wifi_joining = false;
     if (status == WL_NO_SSID_AVAIL) wifi_last_failure = 1;
     else if (status == WL_CONNECT_FAILED) wifi_last_failure = 2;
     else wifi_last_failure = 3;
     if (wifi_failures < 250) wifi_failures++;
+    // A cached BSSID that did not answer is worse than no cache: forget it and
+    // let the next attempt scan for the AP wherever it now is.
+    if (wifi_failures >= 2) wifi_have_bssid = false;
     const bool have_second = WIFI_SSID2[0] && strcmp(WIFI_SSID, WIFI_SSID2) != 0;
-    // Give the known network three complete attempts before trying its peer.
-    if (have_second && (wifi_failures % 3) == 0) wifi_network ^= 1;
+    // If the SSID was not even on the air, switch immediately and re-scan -
+    // there is nothing to wait for. Otherwise give each network two attempts.
+    const bool absent = (wifi_last_failure == 1);
+    if (absent) wifi_scan_done_ms = 0;  // force a fresh look at what is around
+    if (have_second && (absent || (wifi_failures % 2) == 0)) wifi_network ^= 1;
     wifi_retry_started_ms = now;
-    wifi_next_try_ms = now + wifi_retry_delay(wifi_failures);
-    Serial.printf("# wifi keeper: join timed out; retry %u queued\n", (unsigned)wifi_failures);
+    wifi_next_try_ms = now + (absent ? 250u : wifi_retry_delay(wifi_failures));
+    Serial.printf("# wifi keeper: join failed (%u); retry %u queued\n",
+                  (unsigned)wifi_last_failure, (unsigned)wifi_failures);
   }
 
   if ((int32_t)(now - wifi_next_try_ms) < 0) return;
+
+  // Before blind-joining, find out which of the saved networks is actually in
+  // range. Two seconds of scanning replaces up to a minute of hopeful joins.
+  if (wifi_scanning) {
+    if (!wifi_scan_poll(now)) return;
+    wifi_pick_from_scan(now);
+  } else if (!wifi_have_bssid && !wifi_scan_fresh(now)) {
+    wifi_scan_begin(now);
+    return;
+  }
+
   led_hold(LED_WIFI_JOINING, true);
-  const bool reset_radio = wifi_failures >= 6 &&
+  const bool reset_radio = wifi_failures >= 4 &&
     (wifi_last_radio_ms == 0 || (uint32_t)(now - wifi_last_radio_ms) >= WIFI_RADIO_RESET_MS);
   wifi_keeper_start_join(now, reset_radio);
+}
 }
 
 bool webcfg_updating() { return updating; }
