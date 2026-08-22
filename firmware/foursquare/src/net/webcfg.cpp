@@ -39,7 +39,7 @@
 #define FOURSQUARE_BUILD_ID "unknown"
 #endif
 
-#define WEBCFG_API 5   // 3 = editable button map; 4 = editable status LEDs; 5 = weather + the +7d corner
+#define WEBCFG_API 6   // 3 = buttons; 4 = LEDs; 5 = weather + the +7d corner; 6 = ticking/bar seconds
 
 static WebServer  server(80);
 static bool       started  = false;
@@ -120,7 +120,9 @@ static void handle_layout() {
     cfg.slot_widget[i]  = arg_u8(names[0], cfg.slot_widget[i],
                                  (uint8_t)(X_FIRST + X_COUNT - 1));
     cfg.slot_style[i]   = arg_u8(names[1], cfg.slot_style[i],   0x7F);
-    cfg.slot_overlay[i] = arg_u8(names[2], cfg.slot_overlay[i], OV_COUNT - 1);
+    // 4 is OV_LIWEEK (the weekly LinkedIn gain, bottom-left) and 5 is the
+    // seconds bar; both live past the stock overlay enum, so the ceiling is 5.
+    cfg.slot_overlay[i] = arg_u8(names[2], cfg.slot_overlay[i], 5);
   }
   if (server.hasArg("hour24")) cfg.hour24    = arg_u8("hour24", cfg.hour24, 1);
   if (server.hasArg("tempf"))  cfg.temp_unit = arg_u8("tempf",  cfg.temp_unit, 1);
@@ -471,9 +473,12 @@ static void weather_tick() {
     const long cur  = json_long(body, "\"cur_c10\":", &b);
     const long mx   = json_long(body, "\"max_c10\":", &cc);
     const long pop  = json_long(body, "\"pop\":", &dd);
+    bool ee = false;
+    const long mn   = json_long(body, "\"min_c10\":", &ee);
     if (a && b) {
       extras_set_weather((uint8_t)icon, (int16_t)cur,
-                         (int16_t)(cc ? mx : cur), (uint8_t)(dd ? pop : 0));
+                         (int16_t)(cc ? mx : cur), (int16_t)(ee ? mn : cur),
+                         (uint8_t)(dd ? pop : 0));
     }
   } else {
     wx_next_ms = now + 60u * 1000u;
