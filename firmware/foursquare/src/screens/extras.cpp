@@ -73,13 +73,16 @@ int32_t extras_linkedin_gained()    { return li_gained; }
 static uint8_t wx_icon    = 0;
 static int16_t wx_cur_c10 = 0;
 static int16_t wx_max_c10 = 0;
+static int16_t wx_min_c10 = 0;
 static uint8_t wx_pop     = 0;
 static bool    wx_valid   = false;
 
-void extras_set_weather(uint8_t icon, int16_t cur_c10, int16_t max_c10, uint8_t pop) {
+void extras_set_weather(uint8_t icon, int16_t cur_c10, int16_t max_c10,
+                        int16_t min_c10, uint8_t pop) {
   wx_icon    = icon > 7 ? 7 : icon;
   wx_cur_c10 = cur_c10;
   wx_max_c10 = max_c10;
+  wx_min_c10 = min_c10;
   wx_pop     = pop > 100 ? 100 : pop;
   wx_valid   = true;
 }
@@ -282,9 +285,24 @@ void extras_overlay_week(GFXcanvas1 &c) {
   x_text(c, t, 1, (int16_t)(SAFE_Y0 + SAFE_H - 8), SAFE_X0);
 }
 
+// Seconds without digits: a hairline track across the bottom of the safe area
+// that fills left to right once a minute, plus a tick that walks it. Reads at a
+// glance from across the room, where a 6px ":07" does not.
+void extras_overlay_secbar(GFXcanvas1 &c, int seconds) {
+  if (seconds < 0) return;
+  const int16_t y = (int16_t)(SAFE_Y0 + SAFE_H - 4);
+  const int16_t x = (int16_t)(SAFE_X0 + 2);
+  const int16_t w = (int16_t)(SAFE_W - 4);
+  if (w < 8) return;
+  c.drawRect(x, y, w, 4, 1);                        // the empty track
+  const int16_t fill = (int16_t)((long)(w - 2) * (seconds % 60) / 59L);
+  if (fill > 0) c.fillRect((int16_t)(x + 1), (int16_t)(y + 1), fill, 2, 1);
+}
+
 static void x_overlay(GFXcanvas1 &c, uint8_t ov, const FaceData &d) {
   if (ov == 0) return;                      // OV_NONE
   if (ov == 4) { extras_overlay_week(c); return; }   // OV_LIWEEK, bottom left
+  if (ov == 5) { extras_overlay_secbar(c, x_secs(d, 0)); return; }  // OV_SECBAR
   char t[12];
   t[0] = 0;
   if (ov == 1) {                            // OV_SECONDS
@@ -575,25 +593,34 @@ void extras_face_render(GFXcanvas1 &c, uint8_t w, uint8_t ov, const FaceData &d)
     case X_WEATHER: {
       if (!wx_valid) { x_pair(c, "WEATHER", "--", 4); break; }
       const int16_t ix = SAFE_X0;
-      const int16_t iy = (int16_t)(SAFE_Y0 + (SAFE_H - 32) / 2);
+      const int16_t iy = (int16_t)(SAFE_Y0 + 6);
       wx_icon_draw(c, wx_icon, ix, iy);
 
       const int16_t cx = (int16_t)(SAFE_X0 + 40);
       const float now_c = (float)wx_cur_c10 / 10.0f;
       const float max_c = (float)wx_max_c10 / 10.0f;
-      snprintf(b, sizeof b, "%d%c",
-               (int)lroundf(d.temp_f ? now_c * 9.0f / 5.0f + 32.0f : now_c),
-               (char)0xF8);                      // degree glyph in the 5x7 font
-      x_text(c, b, 3, (int16_t)(SAFE_Y0 + 4), cx);
+      const float min_c = (float)wx_min_c10 / 10.0f;
+      const int now_t = (int)lroundf(d.temp_f ? now_c * 9.0f / 5.0f + 32.0f : now_c);
+      const int max_t = (int)lroundf(d.temp_f ? max_c * 9.0f / 5.0f + 32.0f : max_c);
+      const int min_t = (int)lroundf(d.temp_f ? min_c * 9.0f / 5.0f + 32.0f : min_c);
 
-      snprintf(b, sizeof b, "HI %d%c",
-               (int)lroundf(d.temp_f ? max_c * 9.0f / 5.0f + 32.0f : max_c),
-               (char)0xF8);
-      x_text(c, b, 1, (int16_t)(SAFE_Y0 + 30), cx);
+      // What the sky is doing, in words, above the numbers.
+      static const char *const WXN[8] = { "CLEAR", "PARTLY", "CLOUDY", "FOG",
+                                          "DRIZZLE", "RAIN", "SNOW", "STORMS" };
+      x_text(c, WXN[wx_icon & 7], 1, (int16_t)(SAFE_Y0), cx);
 
+      // Now, big.
+      snprintf(b, sizeof b, "%d%c", now_t, (char)0xF8);
+      x_text(c, b, 3, (int16_t)(SAFE_Y0 + 10), cx);
+
+      // Today's high and low on one line, so both are visible at a glance.
+      snprintf(b, sizeof b, "H%d%c L%d%c", max_t, (char)0xF8, min_t, (char)0xF8);
+      x_text(c, b, 1, (int16_t)(SAFE_Y0 + 34), cx);
+
+      // Chance of rain, with a bar under it so it reads from across the room.
       snprintf(b, sizeof b, "RAIN %u%%", (unsigned)wx_pop);
-      x_text(c, b, 1, (int16_t)(SAFE_Y0 + 40), cx);
-      x_bar(c, (int16_t)(SAFE_Y0 + SAFE_H - 6), 6, wx_pop);
+      x_text(c, b, 1, (int16_t)(SAFE_Y0 + 44), cx);
+      x_bar(c, (int16_t)(SAFE_Y0 + SAFE_H - 5), 5, wx_pop);
       break;
     }
 
