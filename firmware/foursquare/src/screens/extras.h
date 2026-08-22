@@ -140,6 +140,18 @@ int32_t extras_linkedin_gained();
 void extras_set_weather(uint8_t icon, int16_t cur_c10, int16_t max_c10,
                         int16_t min_c10, uint8_t pop);
 bool extras_weather_valid();
+
+// Why a remote panel is showing nothing, in the panel's own words. The fetcher
+// writes a short reason every time a read finishes (or is skipped), so a blank
+// LinkedIn or weather screen can say NO WIFI / HTTP 503 / NO DATA YET instead
+// of a bare "--". Also records when the last GOOD read landed, so a panel with
+// cached numbers can admit how old they are.
+//   which: 0 = LinkedIn, 1 = weather
+void extras_feed_note(uint8_t which, const char *reason);
+void extras_feed_ok(uint8_t which);
+const char *extras_feed_reason(uint8_t which);
+/** Minutes since the last good read, or -1 if there has never been one. */
+int32_t extras_feed_age_min(uint8_t which);
 // Preserve the last successful remote readings across a software reset. A
 // network outage never replaces them with blanks; they remain available while
 // the connection keeper recovers, including outages longer than two hours.
