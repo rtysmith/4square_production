@@ -84,55 +84,125 @@ bool extras_splash_active() {
   return true;
 }
 
+// WHICH PANEL AM I? face_render() is not told, and changing its signature
+// would mean patching every call site in a fork we do not own. During the
+// splash every panel is repainted in one burst (clock_sec_mask() returns 0x0F),
+// so the panels arrive back-to-back: a gap longer than a repaint means a new
+// sweep has started and the counter goes back to the top-left. Worst case the
+// four cards are rotated, never blank and never duplicated.
+static uint8_t  splash_slot = 0;
+static uint32_t splash_last_draw_ms = 0;
+
+static uint8_t splash_next_slot() {
+  const uint32_t now = millis();
+  if (splash_last_draw_ms == 0 || (uint32_t)(now - splash_last_draw_ms) > 150u)
+    splash_slot = 0;
+  else
+    splash_slot = (uint8_t)((splash_slot + 1u) & 3u);
+  splash_last_draw_ms = now;
+  return splash_slot;
+}
+
+static const char *splash_stage_label(uint8_t stage) {
+  if (stage == 0) return "ONLINE";
+  if (stage == 1) return "CHECKING LINK";
+  if (stage == 2) return "JOINING";
+  if (stage == 3) return "ASKING FOR IP";
+  if (stage == 4) return "WAITING TO RETRY";
+  return "RESETTING RADIO";
+}
+
+static const char *splash_fail_label(uint8_t failure) {
+  if (failure == 1) return "NO SUCH NETWORK";
+  if (failure == 2) return "PASSWORD REFUSED";
+  if (failure == 3) return "JOIN TIMED OUT";
+  if (failure == 4) return "NO IP ADDRESS";
+  if (failure == 5) return "RADIO STUCK";
+  return 0;
+}
+
+// Long SSIDs do not fit a 128px panel at size 1; clip rather than wrap so the
+// name still reads as itself.
+static void splash_fit(char *out, size_t n, const char *s, size_t max_chars) {
+  if (!s) s = "";
+  size_t len = strlen(s);
+  if (max_chars > n - 1) max_chars = n - 1;
+  if (len <= max_chars) { snprintf(out, n, "%s", s); return; }
+  memcpy(out, s, max_chars - 1);
+  out[max_chars - 1] = '.';
+  out[max_chars] = 0;
+}
+
 void extras_splash_draw(GFXcanvas1 &c) {
-  char b[24];
+  char b[32];
   c.fillScreen(0);
   c.setFont(nullptr);
   c.setTextWrap(false);
 
-  const uint32_t now = millis();
+  const uint32_t now  = millis();
   const uint32_t secs = now / 1000u;
+  const uint8_t  slot = splash_next_slot();
+  const uint8_t  stage = webcfg_wifi_stage();
+  const char    *failed = splash_fail_label(webcfg_wifi_failure());
 
-  x_center(c, "4SQUARE", 2, (int16_t)(SAFE_Y0 + 1));
-  snprintf(b, sizeof b, "%s  SWYR.com", FOURSQUARE_FW_VERSION);
-  x_center(c, b, 1, (int16_t)(SAFE_Y0 + 18));
+  switch (slot) {
+    // ---- top left: who this is ---------------------------------------------
+    case 0:
+      x_center(c, "4SQUARE", 2, (int16_t)(SAFE_Y0 + 4));
+      x_center(c, FOURSQUARE_FW_VERSION, 1, (int16_t)(SAFE_Y0 + 24));
+      x_center(c, "BUILT BY", 1, (int16_t)(SAFE_Y0 + 38));
+      x_center(c, FOURSQUARE_BUILT_BY, 1, (int16_t)(SAFE_Y0 + 48));
+      break;
 
-  if (ui_env.wifi_up) {
-    x_center(c, "WIFI READY", 1, (int16_t)(SAFE_Y0 + 30));
-    x_center(c, ui_env.ip, 1, (int16_t)(SAFE_Y0 + 40));
-    x_bar(c, (int16_t)(SAFE_Y0 + 50), 7, 100);
-    return;
+    // ---- top right: the network it is trying -------------------------------
+    case 1: {
+      x_center(c, "NETWORK", 1, (int16_t)(SAFE_Y0 + 2));
+      splash_fit(b, sizeof b, webcfg_wifi_target_ssid(), 19);
+      x_center(c, b, 1, (int16_t)(SAFE_Y0 + 16));
+      snprintf(b, sizeof b, "SAVED AP %u", (unsigned)webcfg_wifi_network());
+      x_center(c, b, 1, (int16_t)(SAFE_Y0 + 30));
+      snprintf(b, sizeof b, "ATTEMPT %u", (unsigned)webcfg_wifi_attempt());
+      x_center(c, b, 1, (int16_t)(SAFE_Y0 + 42));
+      if (ui_env.wifi_up) {
+        snprintf(b, sizeof b, "SIGNAL %d dBm", (int)ui_env.rssi);
+        x_center(c, b, 1, (int16_t)(SAFE_Y0 + 54));
+      }
+      break;
+    }
+
+    // ---- bottom left: what it is doing right now ---------------------------
+    case 2:
+      x_center(c, "STEP", 1, (int16_t)(SAFE_Y0 + 2));
+      x_center(c, splash_stage_label(ui_env.wifi_up ? 0 : stage), 1,
+               (int16_t)(SAFE_Y0 + 16));
+      x_bar(c, (int16_t)(SAFE_Y0 + 28), 8,
+            ui_env.wifi_up ? 100 : webcfg_wifi_progress());
+      snprintf(b, sizeof b, "%u OF 5", (unsigned)(ui_env.wifi_up ? 5 : stage));
+      x_center(c, b, 1, (int16_t)(SAFE_Y0 + 42));
+      snprintf(b, sizeof b, "UP %lu:%02lu",
+               (unsigned long)(secs / 60u), (unsigned long)(secs % 60u));
+      x_center(c, b, 1, (int16_t)(SAFE_Y0 + 54));
+      break;
+
+    // ---- bottom right: the result, good or bad -----------------------------
+    default:
+      if (ui_env.wifi_up) {
+        x_center(c, "READY", 1, (int16_t)(SAFE_Y0 + 2));
+        x_center(c, ui_env.ip, 1, (int16_t)(SAFE_Y0 + 16));
+        x_center(c, "foursquare-", 1, (int16_t)(SAFE_Y0 + 30));
+        x_center(c, "revo.local", 1, (int16_t)(SAFE_Y0 + 40));
+        x_bar(c, (int16_t)(SAFE_Y0 + 52), 7, 100);
+      } else {
+        x_center(c, "LAST PROBLEM", 1, (int16_t)(SAFE_Y0 + 2));
+        x_center(c, failed ? failed : "NONE YET", 1, (int16_t)(SAFE_Y0 + 16));
+        x_center(c, "WAITING FOR", 1, (int16_t)(SAFE_Y0 + 32));
+        x_center(c, "WIFI TO COME UP", 1, (int16_t)(SAFE_Y0 + 42));
+        snprintf(b, sizeof b, "TRY %u  AP %u", (unsigned)webcfg_wifi_attempt(),
+                 (unsigned)webcfg_wifi_network());
+        x_center(c, b, 1, (int16_t)(SAFE_Y0 + 54));
+      }
+      break;
   }
-
-  const uint8_t stage = webcfg_wifi_stage();
-  const char *label = "STARTING RADIO";
-  if (stage == 1)      label = "CHECKING SIGNAL";
-  else if (stage == 2) label = "JOINING NETWORK";
-  else if (stage == 3) label = "REQUESTING IP";
-  else if (stage == 4) label = "WAITING TO RETRY";
-  else if (stage == 5) label = "RESETTING RADIO";
-
-  const uint8_t failure = webcfg_wifi_failure();
-  const char *failed = 0;
-  if (failure == 1)      failed = "NO SUCH NETWORK";
-  else if (failure == 2) failed = "PASSWORD REFUSED";
-  else if (failure == 3) failed = "JOIN TIMED OUT";
-  else if (failure == 4) failed = "NO IP ADDRESS";
-  else if (failure == 5) failed = "RADIO STUCK";
-
-  x_center(c, label, 1, (int16_t)(SAFE_Y0 + 30));
-  if (failed) {
-    snprintf(b, sizeof b, "LAST: %s", failed);
-    x_center(c, b, 1, (int16_t)(SAFE_Y0 + 40));
-  } else {
-    x_center(c, "NO FAILURES YET", 1, (int16_t)(SAFE_Y0 + 40));
-  }
-
-  x_bar(c, (int16_t)(SAFE_Y0 + 48), 6, webcfg_wifi_progress());
-  snprintf(b, sizeof b, "%lu:%02lu NET %u TRY %u",
-           (unsigned long)(secs / 60u), (unsigned long)(secs % 60u),
-           (unsigned)webcfg_wifi_network(), (unsigned)webcfg_wifi_attempt());
-  x_center(c, b, 1, (int16_t)(SAFE_Y0 + 56));
 }
 
 
