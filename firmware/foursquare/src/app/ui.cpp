@@ -716,6 +716,7 @@ static const uint8_t CLOCK_SEC_MASK = 0x02;
 // corner overlay is OV_SECONDS (1). Variant 0 is the editor's layout;
 // the button-cycled variants still use the factory answer.
 static uint8_t clock_sec_mask() {
+  if (extras_splash_active()) return 0x0F;
   if (variant[PG_CLOCK] != 0) return CLOCK_SEC_MASK;
   uint8_t m = 0;
   for (uint8_t i = 0; i < 4; i++)
