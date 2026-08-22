@@ -39,7 +39,7 @@
 #define FOURSQUARE_BUILD_ID "unknown"
 #endif
 
-#define WEBCFG_API 12  // 12 = a top AND a bottom corner per panel (one nibble each)
+#define WEBCFG_API 13  // 13 = live Wi-Fi recovery stages and DHCP repair
 
 static WebServer  server(80);
 static bool       started  = false;
@@ -69,6 +69,7 @@ static uint32_t   wifi_down_since_ms = 0;
 static uint32_t   wifi_join_since_ms = 0;
 static uint32_t   wifi_dhcp_since_ms = 0;
 static uint32_t   wifi_next_try_ms   = 0;
+static uint32_t   wifi_retry_started_ms = 0;
 static uint32_t   wifi_last_up_ms    = 0;
 static uint32_t   wifi_stable_since_ms = 0;
 static uint32_t   wifi_last_radio_ms = 0;
@@ -87,6 +88,37 @@ static uint32_t wifi_retry_delay(uint8_t failures) {
   return 60000u;
 }
 
+uint8_t webcfg_wifi_stage() {
+  const uint32_t now = millis();
+  if (WiFi.status() == WL_CONNECTED && (uint32_t)WiFi.localIP() != 0u) return 0;
+  if (WiFi.status() == WL_CONNECTED) return 3;
+  if (wifi_joining) return 2;
+  if (wifi_seen_up && (uint32_t)(now - wifi_last_up_ms) < WIFI_LOSS_GRACE_MS) return 1;
+  if ((int32_t)(wifi_next_try_ms - now) > 0) return 4;
+  return 5;
+}
+
+uint8_t webcfg_wifi_progress() {
+  const uint32_t now = millis();
+  uint32_t elapsed = 0, span = 1;
+  switch (webcfg_wifi_stage()) {
+    case 0: return 100;
+    case 1: elapsed = now - wifi_last_up_ms; span = WIFI_LOSS_GRACE_MS; break;
+    case 2: elapsed = now - wifi_join_since_ms; span = WIFI_JOIN_LIMIT_MS; break;
+    case 3: elapsed = now - wifi_dhcp_since_ms; span = WIFI_DHCP_LIMIT_MS; break;
+    case 4:
+      elapsed = now - wifi_retry_started_ms;
+      span = wifi_next_try_ms - wifi_retry_started_ms;
+      break;
+    default: return 5;
+  }
+  if (elapsed >= span) return 100;
+  return (uint8_t)((elapsed * 100u) / span);
+}
+
+uint8_t webcfg_wifi_attempt() { return (uint8_t)(wifi_failures + 1u); }
+uint8_t webcfg_wifi_network() { return (uint8_t)(wifi_network + 1u); }
+
 static void wifi_keeper_start_join(uint32_t now, bool reset_radio) {
   if (reset_radio) {
     Serial.println("# wifi keeper: recycling radio only; displays stay live");
@@ -104,6 +136,8 @@ static void wifi_keeper_start_join(uint32_t now, bool reset_radio) {
   WiFi.setSleep(false);
   WiFi.setAutoReconnect(false);
   WiFi.setTxPower(WIFI_POWER_17dBm);
+  // Clear a stale station address and force a fresh DHCP exchange.
+  WiFi.config(INADDR_NONE, INADDR_NONE, INADDR_NONE);
 
   const bool have_second = WIFI_SSID2[0] && strcmp(WIFI_SSID, WIFI_SSID2) != 0;
   const char *ssid = wifi_network == 1 && have_second ? WIFI_SSID2 : WIFI_SSID;
@@ -178,6 +212,8 @@ void webcfg_wifi_keeper_tick() {
     wifi_seen_up = false;
     wifi_joining = false;
     if (wifi_failures < 250) wifi_failures++;
+    const bool have_second = WIFI_SSID2[0] && strcmp(WIFI_SSID, WIFI_SSID2) != 0;
+    if (have_second && (wifi_failures % 3) == 0) wifi_network ^= 1;
     // A stuck lease is usually the router's DHCP table, not the radio, so a
     // plain rejoin comes first; the radio reset still happens after 6 failures.
     wifi_keeper_start_join(now, wifi_failures >= 6);
@@ -202,6 +238,7 @@ void webcfg_wifi_keeper_tick() {
     const bool have_second = WIFI_SSID2[0] && strcmp(WIFI_SSID, WIFI_SSID2) != 0;
     // Give the known network three complete attempts before trying its peer.
     if (have_second && (wifi_failures % 3) == 0) wifi_network ^= 1;
+    wifi_retry_started_ms = now;
     wifi_next_try_ms = now + wifi_retry_delay(wifi_failures);
     Serial.printf("# wifi keeper: join timed out; retry %u queued\n", (unsigned)wifi_failures);
   }
@@ -238,10 +275,11 @@ static uint8_t arg_u8(const char *name, uint8_t fallback, uint8_t hi) {
 }
 
 static void handle_status() {
-  char body[1024];
+  char body[1152];
   snprintf(body, sizeof body,
     "{\"firmware\":\"4square\",\"build_id\":\"%s\",\"api\":%d,\"ip\":\"%s\",\"ssid\":\"%s\","
     "\"rssi\":%d,\"wifi_recoveries\":%lu,\"last_outage_s\":%lu,"
+    "\"wifi_stage\":%u,\"wifi_progress\":%u,\"wifi_attempt\":%u,\"wifi_network\":%u,"
     "\"uptime_s\":%lu,\"temp_c10\":%d,\"humidity\":%u,"
     "\"extras\":1,\"wide\":%d,\"linkedin\":{\"valid\":%s,\"followers\":%ld,\"gained7d\":%ld},"
     "\"hour24\":%u,\"temp_f\":%u,\"page\":%u,"
@@ -255,6 +293,8 @@ static void handle_status() {
     FOURSQUARE_BUILD_ID, WEBCFG_API,
     WiFi.localIP().toString().c_str(), WiFi.SSID().c_str(), (int)WiFi.RSSI(),
     (unsigned long)wifi_recoveries, (unsigned long)wifi_last_outage_s,
+    (unsigned)webcfg_wifi_stage(), (unsigned)webcfg_wifi_progress(),
+    (unsigned)webcfg_wifi_attempt(), (unsigned)webcfg_wifi_network(),
     (unsigned long)(millis() / 1000),
     ui_env.sht_ok ? (int)(ui_env.sht_c * 10.0f) : -9999,
     (unsigned)ui_env.rh,
