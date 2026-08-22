@@ -6,6 +6,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
+#include <Preferences.h>
 
 // ===========================================================================
 // small drawing helpers, all clipped to the anti-burn-in safe area
@@ -61,30 +62,116 @@ static int32_t li_followers = 0;
 static int32_t li_gained    = 0;
 static bool    li_valid     = false;
 
-void extras_set_linkedin(int32_t followers, int32_t gained7d) {
-  li_followers = followers;
-  li_gained    = gained7d;
-  li_valid     = true;
-}
-bool    extras_linkedin_valid()     { return li_valid; }
-int32_t extras_linkedin_followers() { return li_followers; }
-int32_t extras_linkedin_gained()    { return li_gained; }
-
 static uint8_t wx_icon    = 0;
 static int16_t wx_cur_c10 = 0;
 static int16_t wx_max_c10 = 0;
 static int16_t wx_min_c10 = 0;
 static uint8_t wx_pop     = 0;
 static bool    wx_valid   = false;
+// Minutes past local midnight; -1 until the app has told us.
+static int16_t sun_rise   = -1;
+static int16_t sun_set    = -1;
+
+// How the seconds bar looks. Kept for the whole clock rather than per panel:
+// it is one visual decision, and a panel-sized setting would need a byte the
+// EEPROM record does not have spare.
+static uint8_t secbar_thick = 2;
+static uint8_t secbar_ticks = 0;
+
+static Preferences remote_cache;
+static bool cache_open = false;
+
+static void cache_begin() {
+  if (!cache_open) cache_open = remote_cache.begin("remote-data", false);
+}
+
+void extras_set_secbar(uint8_t thick, uint8_t ticks) {
+  secbar_thick = thick < 1 ? 1 : (thick > 4 ? 4 : thick);
+  secbar_ticks = ticks > 2 ? 0 : ticks;
+  cache_begin();
+  if (cache_open) {
+    remote_cache.putUChar("sb_thick", secbar_thick);
+    remote_cache.putUChar("sb_ticks", secbar_ticks);
+  }
+}
+uint8_t extras_secbar_thick() { return secbar_thick; }
+uint8_t extras_secbar_ticks() { return secbar_ticks; }
+
+void extras_set_sun(int16_t sunrise_min, int16_t sunset_min) {
+  sun_rise = sunrise_min;
+  sun_set  = sunset_min;
+  cache_begin();
+  if (cache_open) {
+    remote_cache.putShort("sun_r", sun_rise);
+    remote_cache.putShort("sun_s", sun_set);
+  }
+}
+
+void extras_set_linkedin(int32_t followers, int32_t gained7d) {
+  const bool changed = !li_valid || li_followers != followers || li_gained != gained7d;
+  li_followers = followers;
+  li_gained    = gained7d;
+  li_valid     = true;
+  if (changed) {
+    cache_begin();
+    if (cache_open) {
+      remote_cache.putLong("li_total", followers);
+      remote_cache.putLong("li_week", gained7d);
+      remote_cache.putBool("li_ok", true);
+    }
+  }
+}
+bool    extras_linkedin_valid()     { return li_valid; }
+int32_t extras_linkedin_followers() { return li_followers; }
+int32_t extras_linkedin_gained()    { return li_gained; }
+
+void extras_cache_restore() {
+  cache_begin();
+  if (!cache_open) return;
+  if (remote_cache.getBool("li_ok", false)) {
+    li_followers = remote_cache.getLong("li_total", 0);
+    li_gained = remote_cache.getLong("li_week", 0);
+    li_valid = true;
+  }
+  secbar_thick = remote_cache.getUChar("sb_thick", 2);
+  if (secbar_thick < 1 || secbar_thick > 4) secbar_thick = 2;
+  secbar_ticks = remote_cache.getUChar("sb_ticks", 0);
+  if (secbar_ticks > 2) secbar_ticks = 0;
+  sun_rise = remote_cache.getShort("sun_r", -1);
+  sun_set  = remote_cache.getShort("sun_s", -1);
+  if (remote_cache.getBool("wx_ok", false)) {
+    wx_icon = remote_cache.getUChar("wx_icon", 0);
+    wx_cur_c10 = remote_cache.getShort("wx_cur", 0);
+    wx_max_c10 = remote_cache.getShort("wx_hi", 0);
+    wx_min_c10 = remote_cache.getShort("wx_lo", 0);
+    wx_pop = remote_cache.getUChar("wx_pop", 0);
+    wx_valid = true;
+  }
+}
 
 void extras_set_weather(uint8_t icon, int16_t cur_c10, int16_t max_c10,
                         int16_t min_c10, uint8_t pop) {
-  wx_icon    = icon > 7 ? 7 : icon;
+  const uint8_t safe_icon = icon > 7 ? 7 : icon;
+  const uint8_t safe_pop = pop > 100 ? 100 : pop;
+  const bool changed = !wx_valid || wx_icon != safe_icon || wx_cur_c10 != cur_c10 ||
+    wx_max_c10 != max_c10 || wx_min_c10 != min_c10 || wx_pop != safe_pop;
+  wx_icon    = safe_icon;
   wx_cur_c10 = cur_c10;
   wx_max_c10 = max_c10;
   wx_min_c10 = min_c10;
-  wx_pop     = pop > 100 ? 100 : pop;
+  wx_pop     = safe_pop;
   wx_valid   = true;
+  if (changed) {
+    cache_begin();
+    if (cache_open) {
+      remote_cache.putUChar("wx_icon", wx_icon);
+      remote_cache.putShort("wx_cur", wx_cur_c10);
+      remote_cache.putShort("wx_hi", wx_max_c10);
+      remote_cache.putShort("wx_lo", wx_min_c10);
+      remote_cache.putUChar("wx_pop", wx_pop);
+      remote_cache.putBool("wx_ok", true);
+    }
+  }
 }
 bool extras_weather_valid() { return wx_valid; }
 
@@ -275,32 +362,53 @@ template <class T> static auto x_secs(const T &d, int) -> decltype((int)d.second
 }
 template <class T> static int x_secs(const T &, long) { return -1; }
 
-// The weekly LinkedIn gain, bottom LEFT, small. Left rather than right so it
-// can sit alongside seconds or a temperature on the same panel without the two
-// colliding.
-void extras_overlay_week(GFXcanvas1 &c) {
+// The weekly LinkedIn gain, small, along the RIGHT edge so it reads as a
+// footnote to the follower count rather than competing with the sunrise time
+// that lives on the left.
+void extras_overlay_week_at(GFXcanvas1 &c, bool top) {
   char t[12];
   if (!li_valid) snprintf(t, sizeof t, "+--");
   else           snprintf(t, sizeof t, "%+ld", (long)li_gained);
-  x_text(c, t, 1, (int16_t)(SAFE_Y0 + SAFE_H - 8), SAFE_X0);
+  const int16_t w = (int16_t)(strlen(t) * 6 - 1);
+  x_text(c, t, 1, top ? SAFE_Y0 : (int16_t)(SAFE_Y0 + SAFE_H - 8),
+         (int16_t)(SAFE_X0 + SAFE_W - w));
 }
+void extras_overlay_week(GFXcanvas1 &c) { extras_overlay_week_at(c, false); }
 
-// Seconds without digits: a straight filled bar across the bottom of the safe
-// area that grows left to right once a minute. No outline — just the bar.
-void extras_overlay_secbar(GFXcanvas1 &c, int seconds) {
+// Seconds without digits: a straight filled bar across the panel that grows
+// left to right once a minute. No outline. The thickness and the hash marks
+// are the clock-wide settings above, and it can ride the top edge instead of
+// the bottom when the panel's overlay byte says so.
+void extras_overlay_secbar_at(GFXcanvas1 &c, int seconds, bool top) {
   if (seconds < 0) return;
-  const int16_t y = (int16_t)(SAFE_Y0 + SAFE_H - 4);
+  const int16_t th = (int16_t)secbar_thick;
+  const int16_t y = top ? (int16_t)(SAFE_Y0 + 1)
+                        : (int16_t)(SAFE_Y0 + SAFE_H - th);
   const int16_t x = (int16_t)(SAFE_X0 + 2);
   const int16_t w = (int16_t)(SAFE_W - 4);
   if (w < 8) return;
   const int16_t fill = (int16_t)((long)w * (seconds % 60) / 59L);
-  if (fill > 0) c.fillRect(x, y, fill, 4, 1);
+  if (fill > 0) c.fillRect(x, y, fill, th, 1);
+
+  // Hash marks sit just clear of the bar, on the side facing the panel, so
+  // they read as a scale rather than as part of the fill.
+  if (secbar_ticks) {
+    const int step = secbar_ticks == 1 ? 15 : 10;
+    const int16_t mark_y = top ? (int16_t)(y + th + 1) : (int16_t)(y - 3);
+    for (int sec = step; sec < 60; sec += step) {
+      const int16_t mx = (int16_t)(x + (int16_t)((long)w * sec / 59L));
+      c.drawFastVLine(mx, mark_y, 2, 1);
+    }
+  }
+}
+void extras_overlay_secbar(GFXcanvas1 &c, int seconds) {
+  extras_overlay_secbar_at(c, seconds, false);
 }
 
-// Signal strength as three bars, bottom right. Empty outlines for the bars the
-// signal doesn't reach; a small x when the radio is down altogether.
-void extras_overlay_wifi(GFXcanvas1 &c) {
-  const int16_t base = (int16_t)(SAFE_Y0 + SAFE_H - 2);
+// Signal strength as three bars. Empty outlines for the bars the signal does
+// not reach; a small x when the radio is down altogether.
+void extras_overlay_wifi_at(GFXcanvas1 &c, bool top) {
+  const int16_t base = top ? (int16_t)(SAFE_Y0 + 9) : (int16_t)(SAFE_Y0 + SAFE_H - 2);
   const int16_t x0 = (int16_t)(SAFE_X0 + SAFE_W - 14);
   if (!ui_env.wifi_up) {
     c.drawLine(x0, (int16_t)(base - 8), (int16_t)(x0 + 8), base, 1);
@@ -318,12 +426,59 @@ void extras_overlay_wifi(GFXcanvas1 &c) {
     else          c.drawRect(x, (int16_t)(base - h), 3, h, 1);
   }
 }
+void extras_overlay_wifi(GFXcanvas1 &c) { extras_overlay_wifi_at(c, false); }
 
-static void x_overlay(GFXcanvas1 &c, uint8_t ov, const FaceData &d) {
+// Sunrise on the left, sunset on the right, both as a small arrow and a
+// wall-clock time. The numbers come from the app with the forecast, so they
+// follow the same ZIP as the weather panel and survive a reboot in flash.
+// A little sun sitting on the horizon with an arrow through it: disc, ground
+// line, and three rays pointing the way it is going. At this size a bare
+// triangle read as a play button, which is why the disc is here.
+static void sun_glyph(GFXcanvas1 &c, int16_t x, int16_t y, bool up) {
+  const int16_t cx = (int16_t)(x + 3);
+  const int16_t cy = (int16_t)(y + 3);
+  c.fillCircle(cx, cy, 2, 1);
+  // The horizon under (rising) or over (setting) the disc.
+  c.drawFastHLine(x, up ? (int16_t)(y + 6) : (int16_t)(y - 1), 7, 1);
+  // Arrow: a stalk away from the horizon with a head on the end.
+  const int16_t tip = up ? (int16_t)(y - 1) : (int16_t)(y + 6);
+  const int16_t step = up ? 1 : -1;
+  for (int16_t i = 0; i < 2; i++) {
+    c.drawFastHLine((int16_t)(cx - i), (int16_t)(tip + i * step),
+                    (int16_t)(1 + i * 2), 1);
+  }
+}
+
+void extras_overlay_sun(GFXcanvas1 &c, uint8_t which, bool top) {
+  const int16_t y = top ? SAFE_Y0 : (int16_t)(SAFE_Y0 + SAFE_H - 7);
+  char t[10];
+  if (which == 7 || which == 9) {
+    if (sun_rise >= 0) {
+      snprintf(t, sizeof t, "%d:%02d", (int)(sun_rise / 60), (int)(sun_rise % 60));
+      sun_glyph(c, SAFE_X0, (int16_t)(y + 1), true);
+      x_text(c, t, 1, y, (int16_t)(SAFE_X0 + 9));
+    }
+  }
+  if (which == 8 || which == 9) {
+    if (sun_set >= 0) {
+      int hh = (int)(sun_set / 60);
+      if (hh > 12) hh -= 12;
+      snprintf(t, sizeof t, "%d:%02d", hh, (int)(sun_set % 60));
+      const int16_t w = (int16_t)(strlen(t) * 6 - 1);
+      const int16_t x = (int16_t)(SAFE_X0 + SAFE_W - w);
+      if (which == 9 && x < SAFE_X0 + 60) return;  // no room for both, keep sunrise
+      sun_glyph(c, (int16_t)(x - 9), (int16_t)(y + 1), false);
+      x_text(c, t, 1, y, x);
+    }
+  }
+}
+
+static void x_overlay_one(GFXcanvas1 &c, uint8_t ov, bool top, const FaceData &d) {
   if (ov == 0) return;                      // OV_NONE
-  if (ov == 4) { extras_overlay_week(c); return; }   // OV_LIWEEK, bottom left
-  if (ov == 5) { extras_overlay_secbar(c, x_secs(d, 0)); return; }  // OV_SECBAR
-  if (ov == 6) { extras_overlay_wifi(c); return; }   // OV_WIFI, bottom right
+  if (ov == 4) { extras_overlay_week_at(c, top); return; }        // LinkedIn week
+  if (ov == 5) { extras_overlay_secbar_at(c, x_secs(d, 0), top); return; }
+  if (ov == 6) { extras_overlay_wifi_at(c, top); return; }        // Wi-Fi bars
+  if (ov >= 7 && ov <= 9) { extras_overlay_sun(c, ov, top); return; }
   char t[12];
   t[0] = 0;
   if (ov == 1) {                            // OV_SECONDS
@@ -342,7 +497,21 @@ static void x_overlay(GFXcanvas1 &c, uint8_t ov, const FaceData &d) {
   }
   const int16_t w = (int16_t)(strlen(t) * 6 - 1);
   // Lifted a few pixels so AM/PM and the seconds bar don't feel glued together.
-  x_text(c, t, 1, (int16_t)(SAFE_Y0 + SAFE_H - 12), (int16_t)(SAFE_X0 + SAFE_W - w));
+  x_text(c, t, 1, top ? SAFE_Y0 : (int16_t)(SAFE_Y0 + SAFE_H - 12),
+         (int16_t)(SAFE_X0 + SAFE_W - w));
+}
+
+// The saved byte holds two items: the low nibble rides the bottom edge, the
+// high nibble the top. Either may be zero, so one byte covers "nothing", "just
+// a bottom item", "just a top item" and "one of each".
+static void x_overlay(GFXcanvas1 &c, uint8_t ovraw, const FaceData &d) {
+  x_overlay_one(c, (uint8_t)(ovraw & 0x0F), false, d);
+  x_overlay_one(c, (uint8_t)((ovraw >> 4) & 0x0F), true, d);
+}
+
+// The whole overlay switch, callable from faces.cpp for an ordinary widget.
+void extras_overlay_full(GFXcanvas1 &c, uint8_t ov, const FaceData &d) {
+  x_overlay(c, ov, d);
 }
 
 // ---- the weather icon ------------------------------------------------------
@@ -592,7 +761,7 @@ void extras_face_render(GFXcanvas1 &c, uint8_t w, uint8_t ov, const FaceData &d)
       // overlay row rather than jammed against the top edge: pinning it high
       // left the number floating with a hole under it, which is the thing that
       // looked broken.
-      if (ov != 0) {
+      if ((ov & 0x0F) != 0) {
         x_center(c, "LINKEDIN", 1, (int16_t)(SAFE_Y0 + 3));
         x_center(c, b, 3, (int16_t)(SAFE_Y0 + 17));
       } else {
@@ -620,7 +789,7 @@ void extras_face_render(GFXcanvas1 &c, uint8_t w, uint8_t ov, const FaceData &d)
       // label on the same baseline even when the seconds bar is selected —
       // lifting it made AM/PM crowd the clock digits instead of reading as the
       // lower line of the clock.
-      if (!d.hour24 && ov != 2) {
+      if (!d.hour24 && (ov & 0x0F) != 2 && ((ov >> 4) & 0x0F) != 2) {
         int16_t y = (int16_t)(SAFE_Y0 + 38);
         x_center(c, d.hour < 12 ? "AM" : "PM", 1, y);
       }
