@@ -3,6 +3,7 @@
 #include "display.h"
 #include "../app/ui.h"
 #include "../board/sensors.h"
+#include "../net/webcfg.h"
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -332,7 +333,24 @@ static void draw_moon(GFXcanvas1 &c, uint8_t phase) {
 
 static void draw_wifi(GFXcanvas1 &c) {
   char b[20];
-  if (!ui_env.wifi_up) { x_pair(c, "WIFI", "DOWN", 3); return; }
+  if (!ui_env.wifi_up) {
+    const uint8_t stage = webcfg_wifi_stage();
+    const uint8_t pct = webcfg_wifi_progress();
+    const char *label = "RESET RADIO";
+    if (stage == 1) label = "CHECKING LINK";
+    else if (stage == 2) label = "JOINING WIFI";
+    else if (stage == 3) label = "GETTING IP";
+    else if (stage == 4) label = "RETRY WAIT";
+    x_center(c, "WIFI RECOVERY", 1, (int16_t)(SAFE_Y0 + 1));
+    x_center(c, label, 1, (int16_t)(SAFE_Y0 + 13));
+    x_center(c, "JOIN > IP > LIVE", 1, (int16_t)(SAFE_Y0 + 25));
+    x_bar(c, (int16_t)(SAFE_Y0 + 37), 8, pct);
+    snprintf(b, sizeof b, "NET %u TRY %u %u%%",
+             (unsigned)webcfg_wifi_network(),
+             (unsigned)webcfg_wifi_attempt(), (unsigned)pct);
+    x_center(c, b, 1, (int16_t)(SAFE_Y0 + 49));
+    return;
+  }
   const int rssi = ui_env.rssi;
   int bars = 0;
   if (rssi > -55)      bars = 4;
