@@ -21,6 +21,9 @@
 #ifndef DEMO_BUILD
 #include <WiFi.h>
 #include <esp_netif.h>
+#include <lwip/inet.h>
+#include <lwip/netdb.h>
+
 
 #include <ESPmDNS.h>
 #include <WebServer.h>
@@ -355,6 +358,26 @@ void webcfg_wifi_keeper_tick() {
     // original sketch's one-shot connect left behind.
     snprintf(ui_env.ip, sizeof ui_env.ip, "%s",
              WiFi.localIP().toString().c_str());
+
+    // A lease that arrives without a name server (or one wiped by our own
+    // DHCP restarts) leaves the clock online but unable to resolve anything,
+    // which is exactly what an empty LinkedIn/weather panel looks like. Fill
+    // in a public resolver whenever the router did not give us one.
+    if ((uint32_t)WiFi.dnsIP() == 0u) {
+      esp_netif_t *sta_dns = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+      if (sta_dns) {
+        esp_netif_dns_info_t d1 = {};
+        d1.ip.type = ESP_IPADDR_TYPE_V4;
+        d1.ip.u_addr.ip4.addr = ipaddr_addr("1.1.1.1");
+        esp_netif_set_dns_info(sta_dns, ESP_NETIF_DNS_MAIN, &d1);
+        esp_netif_dns_info_t d2 = {};
+        d2.ip.type = ESP_IPADDR_TYPE_V4;
+        d2.ip.u_addr.ip4.addr = ipaddr_addr("8.8.8.8");
+        esp_netif_set_dns_info(sta_dns, ESP_NETIF_DNS_BACKUP, &d2);
+        Serial.println("# wifi keeper: lease had no DNS; using 1.1.1.1");
+      }
+    }
+
 
     if (newly_up) {
       wifi_stable_since_ms = now == 0 ? 1 : now;
@@ -945,6 +968,31 @@ static bool remote_read_ready(uint32_t now, uint8_t which) {
   return true;
 }
 
+/**
+ * Name lookup for the app's host, done up front so a resolver problem reads as
+ * "NO DNS" on the panel instead of a bare TLS failure sixty seconds later.
+ * The result is also what tells us whether the failure is DNS or the network.
+ */
+static bool host_resolves(uint8_t which) {
+  IPAddress addr;
+  if (WiFi.hostByName("project--93f6b6d0-48fb-4dbe-87b6-455b65129623.lovable.app", addr) == 1 &&
+      (uint32_t)addr != 0u) {
+    return true;
+  }
+  extras_feed_note(which, "NO DNS");
+  Serial.println("# feed: DNS lookup failed");
+  return false;
+}
+
+/** A TLS handshake needs tens of kilobytes; say so rather than failing blind. */
+static bool enough_heap(uint8_t which) {
+  if (ESP.getFreeHeap() >= 45000u) return true;
+  extras_feed_note(which, "LOW MEMORY");
+  Serial.printf("# feed: only %u bytes free, skipping fetch\n", (unsigned)ESP.getFreeHeap());
+  return false;
+}
+
+
 // HTTPClient's negative codes as something a person can read off a panel.
 static void note_http_error(uint8_t which, int code) {
   char t[18];
@@ -975,6 +1023,7 @@ static void linkedin_tick() {
   if (!remote_read_ready(now, 0)) return;
   if ((int32_t)(now - li_next_ms) < 0) return;
   li_next_ms = now + 15u * 60u * 1000u;
+  if (!host_resolves(0) || !enough_heap(0)) { li_next_ms = now + 30000u; return; }
 
   WiFiClientSecure tls;
   tls.setInsecure();
@@ -1036,6 +1085,7 @@ static void weather_tick() {
   if (!remote_read_ready(now, 1)) return;
   if ((int32_t)(now - wx_next_ms) < 0) return;
   wx_next_ms = now + 20u * 60u * 1000u;
+  if (!host_resolves(1) || !enough_heap(1)) { wx_next_ms = now + 30000u; return; }
 
   WiFiClientSecure tls;
   tls.setInsecure();
