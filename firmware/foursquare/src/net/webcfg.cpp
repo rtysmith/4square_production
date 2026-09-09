@@ -1316,7 +1316,7 @@ static void json_escape(const char *in, char *out, size_t cap) {
   size_t o = 0;
   for (size_t i = 0; in && in[i] && o + 2 < cap; i++) {
     const char ch = in[i];
-    if (ch == '"' || ch == '\') { out[o++] = '\'; out[o++] = ch; }
+    if (ch == '"' || ch == '\\') { out[o++] = '\\'; out[o++] = ch; }
     else if ((unsigned char)ch < 0x20) { out[o++] = ' '; }
     else out[o++] = ch;
   }
@@ -1365,7 +1365,7 @@ static void handle_phone_page() {
     "document.getElementById('st').textContent=m.open?'menu open':'showing the clock';"
     "document.getElementById('title').innerHTML='<b>'+m.title+'</b> '+(m.value||'');"
     "document.getElementById('rows').innerHTML=m.items.map((t,i)=>"
-    "'<div class="row'+(i==m.row?' sel':'')+'">'+(i==m.row?'> ':'&nbsp;&nbsp;')+t+'</div>').join('');"
+    "'<div class=\"row'+(i==m.row?' sel':'')+'\">'+(i==m.row?'> ':'&nbsp;&nbsp;')+t+'</div>').join('');"
     "const l=await j('/api/lists');"
     "document.getElementById('tk').innerHTML=(l.tickers?l.tickers.split(','):[]).map((t,i)=>"
     "'<span class=chip onclick=delt('+i+')>'+t+' x</span>').join('')||'<small>'+l.quote_state+'</small>';"
@@ -1396,20 +1396,20 @@ static void handle_menu() {
       if (k == "back") extras_menu_key(0);
     }
   }
-  String body = "{"ok":true,"open":";
+  String body = "{\"ok\":true,\"open\":";
   body += extras_menu_active() ? "true" : "false";
   char esc[80];
   json_escape(extras_menu_title(), esc, sizeof esc);
-  body += ","title":""; body += esc; body += """;
-  body += ","row":";   body += (int)extras_menu_row();
-  body += ","count":"; body += (int)extras_menu_count();
+  body += ",\"title\":\""; body += esc; body += "\"";
+  body += ",\"row\":";   body += (int)extras_menu_row();
+  body += ",\"count\":"; body += (int)extras_menu_count();
   json_escape(extras_menu_value(), esc, sizeof esc);
-  body += ","value":""; body += esc; body += "","items":[";
+  body += ",\"value\":\""; body += esc; body += "\",\"items\":[";
   const uint8_t n = extras_menu_count();
   for (uint8_t i = 0; i < n && i < 24; i++) {
     json_escape(extras_menu_label(i), esc, sizeof esc);
     if (i) body += ",";
-    body += """; body += esc; body += """;
+    body += "\""; body += esc; body += "\"";
   }
   body += "]}";
   send_json(200, body.c_str());
@@ -1427,12 +1427,12 @@ static void handle_homes() {
     if (server.hasArg("store")) extras_home_store(idx);
     if (server.hasArg("use"))   extras_home_apply(idx);
   }
-  String body = "{"ok":true,"active":";
+  String body = "{\"ok\":true,\"active\":";
   body += (int)extras_home_active();
-  body += ","screens":[";
+  body += ",\"screens\":[";
   for (uint8_t i = 0; i < 4; i++) {
     if (i) body += ",";
-    body += "{"mode":"; body += (int)extras_home_mode(i); body += ","slots":[";
+    body += "{\"mode\":"; body += (int)extras_home_mode(i); body += ",\"slots\":[";
     for (uint8_t sl = 0; sl < 4; sl++) {
       uint8_t w = 0, sub = 0, ov = 0;
       extras_home_get(i, sl, &w, &sub, &ov);
@@ -1455,20 +1455,20 @@ static void handle_lists() {
     mk_next_ms = millis();   // refresh both feeds against the new lists
     sp_next_ms = millis();
   }
-  String body = "{"ok":true,"tickers":"";
+  String body = "{\"ok\":true,\"tickers\":\"";
   body += extras_ticker_csv();
-  body += "","teams":"";
+  body += "\",\"teams\":\"";
   body += extras_team_csv();
-  body += "","quote_state":"";
+  body += "\",\"quote_state\":\"";
   body += extras_feed_reason(2);
-  body += "","score_state":"";
+  body += "\",\"score_state\":\"";
   body += extras_feed_reason(3);
-  body += ""}";
+  body += "\"}";
   send_json(200, body.c_str());
 }
 
 static void handle_portal_switch() {
-  send_json(200, "{"ok":true,"portal":true}");
+  send_json(200, "{\"ok\":true,\"portal\":true}");
   server.handleClient();
   webcfg_portal_open();
 }
@@ -1812,8 +1812,7 @@ static void market_tick() {
   if (!feed_get_lines(url, 2, &body)) { mk_next_ms = now + 60000u; return; }
   int at = 0, got = 0;
   while (at < (int)body.length()) {
-    int nl = body.indexOf('
-', at);
+    int nl = body.indexOf('\n', at);
     if (nl < 0) nl = body.length();
     const String line = body.substring(at, nl);
     at = nl + 1;
@@ -1843,8 +1842,7 @@ static void sports_tick() {
   if (!feed_get_lines(url, 3, &body)) { sp_next_ms = now + 60000u; return; }
   int at = 0, got = 0;
   while (at < (int)body.length()) {
-    int nl = body.indexOf('
-', at);
+    int nl = body.indexOf('\n', at);
     if (nl < 0) nl = body.length();
     const String line = body.substring(at, nl);
     at = nl + 1;
