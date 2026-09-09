@@ -21,6 +21,7 @@
 #ifndef DEMO_BUILD
 #include <WiFi.h>
 #include <esp_netif.h>
+#include <esp_system.h>
 #include <lwip/inet.h>
 #include <lwip/netdb.h>
 
@@ -46,7 +47,7 @@
 #define FOURSQUARE_BUILD_ID "unknown"
 #endif
 
-#define WEBCFG_API 23  // 23 = keeper pumps HTTP control + remote feeds itself
+#define WEBCFG_API 25  // 25 = restart forensics, one-at-a-time feeds, steadier radio power
 
 static WebServer  server(80);
 static bool       started  = false;
@@ -64,6 +65,105 @@ static const uint32_t UPDATE_STALL_MS = 30000;
 // the socket closed first; restarting inside the handler made a good install
 // look like a failed one.
 static uint32_t   pending_restart_ms = 0;
+
+// ---- WHY DID IT RESTART? ---------------------------------------------------
+// A clock that reboots looks exactly like a clock that lost Wi-Fi: the panels
+// clear, the address disappears, and the browser cannot reach it. They are
+// completely different faults with completely different fixes, so the silicon
+// is asked directly. esp_reset_reason() survives the reboot, and the previous
+// run's uptime plus its low-water heap mark are kept in NVS, which is how a
+// crash (panic / heap exhaustion) can be told apart from a power dip
+// (brownout) and from a stuck main loop (task watchdog).
+static Preferences diag_prefs;
+static uint8_t  diag_reset_code   = 0;   // esp_reset_reason() of THIS boot
+static uint32_t diag_prev_uptime  = 0;   // seconds the previous run lasted
+static uint32_t diag_prev_minheap = 0;   // its lowest free heap
+static uint32_t diag_boots        = 0;   // reboots recorded on this clock
+static uint32_t diag_save_ms      = 0;
+static bool     diag_ready        = false;
+
+static const char *diag_reason_text(uint8_t code) {
+  switch ((esp_reset_reason_t)code) {
+    case ESP_RST_POWERON:  return "POWER ON";
+    case ESP_RST_EXT:      return "RESET PIN";
+    case ESP_RST_SW:       return "SOFTWARE";
+    case ESP_RST_PANIC:    return "CRASH";
+    case ESP_RST_INT_WDT:  return "INT WATCHDOG";
+    case ESP_RST_TASK_WDT: return "TASK WATCHDOG";
+    case ESP_RST_WDT:      return "WATCHDOG";
+    case ESP_RST_DEEPSLEEP:return "DEEP SLEEP";
+    case ESP_RST_BROWNOUT: return "POWER DIP";
+    case ESP_RST_SDIO:     return "SDIO";
+    default:               return "UNKNOWN";
+  }
+}
+
+const char *webcfg_reset_text() { return diag_reason_text(diag_reset_code); }
+uint8_t  webcfg_reset_code()      { return diag_reset_code; }
+uint32_t webcfg_prev_uptime_s()   { return diag_prev_uptime; }
+uint32_t webcfg_boot_count()      { return diag_boots; }
+
+// Called once from the keeper, which is the one routine guaranteed to run.
+static void diag_boot_note() {
+  if (diag_ready) return;
+  diag_ready = true;
+  diag_reset_code = (uint8_t)esp_reset_reason();
+  if (diag_prefs.begin("4sqdiag", false)) {
+    diag_prev_uptime  = diag_prefs.getUInt("up", 0);
+    diag_prev_minheap = diag_prefs.getUInt("mh", 0);
+    diag_boots        = diag_prefs.getUInt("boots", 0) + 1u;
+    diag_prefs.putUInt("boots", diag_boots);
+    diag_prefs.putUChar("last", diag_reset_code);
+    diag_prefs.putUInt("up", 0);
+    diag_prefs.end();
+  }
+  Serial.printf("# boot %lu: reset reason %s; previous run lasted %lus with %lu bytes free at its worst\n",
+                (unsigned long)diag_boots, diag_reason_text(diag_reset_code),
+                (unsigned long)diag_prev_uptime, (unsigned long)diag_prev_minheap);
+}
+
+// A cheap once-a-minute write so the NEXT boot can say how long this run
+// lasted. NVS wear at one record per minute is irrelevant next to knowing
+// whether the clock ran for two minutes or two days before it went down.
+static void diag_heartbeat(uint32_t now) {
+  if (diag_save_ms && (uint32_t)(now - diag_save_ms) < 60000u) return;
+  diag_save_ms = now == 0 ? 1u : now;
+  if (!diag_prefs.begin("4sqdiag", false)) return;
+  diag_prefs.putUInt("up", now / 1000u);
+  diag_prefs.putUInt("mh", (uint32_t)ESP.getMinFreeHeap());
+  diag_prefs.end();
+}
+
+// ---- one network transaction at a time -------------------------------------
+// Four feeds each open their own TLS session. When two or more fall due in the
+// same loop pass the clock spends half a minute inside blocking socket calls
+// with the loop watchdog disabled, the HTTP server unserviced and 40 KB of
+// mbedtls buffers live at once. That is the shape of both the task-watchdog
+// reset and the out-of-memory crash. Only one fetch may start per pass, and
+// never within eight seconds of the previous one.
+static uint32_t feed_last_ms = 0;
+static bool     feed_in_pass = false;
+static const uint32_t FEED_SPACING_MS = 8000u;
+
+static bool feed_slot_free(uint32_t now) {
+  if (feed_in_pass) return false;
+  if (feed_last_ms && (uint32_t)(now - feed_last_ms) < FEED_SPACING_MS) return false;
+  return true;
+}
+
+static void feed_slot_take(uint32_t now) {
+  feed_in_pass = true;
+  feed_last_ms = now == 0 ? 1u : now;
+}
+
+// The loop watchdog must come back on however a fetch ends - including the
+// early returns that used to leave it disabled for the rest of the run.
+struct WdtPause {
+  WdtPause()  { disableLoopWDT(); }
+  ~WdtPause() { enableLoopWDT(); }
+};
+
+
 
 
 // ---- Wi-Fi connection keeper ----------------------------------------------
@@ -139,6 +239,10 @@ static uint8_t  wifi_net_bssid[2][6] = {{0}, {0}};
 // feed jobs here so an online keeper can drive them independently of OTA.
 static void linkedin_tick();
 static void weather_tick();
+static void market_tick();
+static void sports_tick();
+static uint32_t mk_next_ms = 16000;   // quotes, shortly after the radio is up
+static uint32_t sp_next_ms = 20000;   // scores
 
 // ---- saved Wi-Fi credentials, and the setup access point -------------------
 // Credentials live in NVS (a namespace of their own, untouched by a firmware
@@ -453,6 +557,11 @@ void webcfg_wifi_keeper_tick() {
     extras_cache_restore();
   }
   const uint32_t now = millis();
+  // Read the reset reason once, then leave a breadcrumb every minute so the
+  // next boot can say how long this run lasted. This is the only way to tell
+  // "the Wi-Fi dropped" from "the clock rebooted".
+  diag_boot_note();
+  diag_heartbeat(now);
 
   // SETUP MODE runs instead of the station machine, and it needs the HTTP
   // server pumped at full speed rather than four times a second.
@@ -512,6 +621,24 @@ void webcfg_wifi_keeper_tick() {
     wifi_last_up_ms = now;
     ui_env.wifi_up = true;
     ui_env.rssi = WiFi.RSSI();
+
+    // TRANSMIT POWER IS A POWER-SUPPLY PROBLEM, NOT A RANGE PROBLEM. At
+    // 17 dBm the radio pulls a short, sharp current spike on every uplink
+    // frame. On a board that is also driving four panels, that spike riding
+    // on a long or thin USB cable is enough to dip the rail and trip the
+    // brownout detector - which reboots the clock, which looks exactly like a
+    // Wi-Fi drop. When the access point is close (a strong signal), the extra
+    // power buys nothing, so back off and keep the rail steady; only a weak
+    // signal gets the full 17 dBm.
+    static int8_t tx_now = 0;   // 0 unset, 1 low, 2 high
+    const int32_t rssi_now = WiFi.RSSI();
+    const int8_t want = (rssi_now != 0 && rssi_now > -60) ? 1 : 2;
+    if (want != tx_now) {
+      tx_now = want;
+      WiFi.setTxPower(want == 1 ? WIFI_POWER_11dBm : WIFI_POWER_17dBm);
+      Serial.printf("# wifi keeper: %s transmit power at %d dBm signal\n",
+                    want == 1 ? "easing" : "raising", (int)rssi_now);
+    }
     // The address is what every screen actually shows. The keeper owns the
     // join now, so the keeper owns this field too: refresh it on every online
     // tick (a renewed lease can change it) rather than trusting whatever the
@@ -740,11 +867,13 @@ static uint8_t arg_u8(const char *name, uint8_t fallback, uint8_t hi) {
 }
 
 static void handle_status() {
-  char body[1320];
+  char body[1520];
   snprintf(body, sizeof body,
     "{\"firmware\":\"4square\",\"build_id\":\"%s\",\"version\":\"%s\",\"api\":%d,\"portal\":%s,\"ip\":\"%s\",\"ssid\":\"%s\","
     "\"rssi\":%d,\"wifi_recoveries\":%lu,\"last_outage_s\":%lu,"
     "\"wifi_stage\":%u,\"wifi_progress\":%u,\"wifi_attempt\":%u,\"wifi_network\":%u,\"wifi_failure\":%u,"
+    "\"reset\":\"%s\",\"reset_code\":%u,\"boots\":%lu,\"prev_uptime_s\":%lu,"
+    "\"heap\":%lu,\"min_heap\":%lu,"
     "\"uptime_s\":%lu,\"temp_c10\":%d,\"humidity\":%u,"
     "\"extras\":1,\"wide\":%d,\"linkedin\":{\"valid\":%s,\"followers\":%ld,\"gained7d\":%ld},"
     "\"feeds\":{\"linkedin\":\"%s\",\"weather\":\"%s\"},"
@@ -764,6 +893,9 @@ static void handle_status() {
     (unsigned)webcfg_wifi_stage(), (unsigned)webcfg_wifi_progress(),
     (unsigned)webcfg_wifi_attempt(), (unsigned)webcfg_wifi_network(),
     (unsigned)webcfg_wifi_failure(),
+    diag_reason_text(diag_reset_code), (unsigned)diag_reset_code,
+    (unsigned long)diag_boots, (unsigned long)diag_prev_uptime,
+    (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getMinFreeHeap(),
     (unsigned long)(millis() / 1000),
     ui_env.sht_ok ? (int)(ui_env.sht_c * 10.0f) : -9999,
     (unsigned)ui_env.rh,
@@ -874,7 +1006,8 @@ static void handle_extras() {
   if (server.hasArg("wide")) extras_set_wide((int)server.arg("wide").toInt());
   if (server.hasArg("followers"))
     extras_set_linkedin((int32_t)server.arg("followers").toInt(),
-                        (int32_t)server.arg("gained").toInt());
+                        (int32_t)server.arg("gained").toInt(),
+                        server.hasArg("gained"));
   char body[128];
   snprintf(body, sizeof body,
            "{\"ok\":true,\"wide\":%d,\"followers\":%ld,\"gained7d\":%ld}",
@@ -1172,6 +1305,174 @@ void webcfg_factory_reset() {
 }
 
 
+// ---- setup mode and rejoin on demand ---------------------------------------
+void webcfg_portal_open() { wifi_portal_start("asked for from the menu or the app"); }
+void webcfg_wifi_rejoin() { WiFi.disconnect(false, false); }
+
+// ---- the menu, the home screens and the two lists, over HTTP ---------------
+// Everything the four buttons can reach is also an endpoint, so the phone is a
+// peer of the glass rather than a second, diverging interface.
+static void json_escape(const char *in, char *out, size_t cap) {
+  size_t o = 0;
+  for (size_t i = 0; in && in[i] && o + 2 < cap; i++) {
+    const char ch = in[i];
+    if (ch == '"' || ch == '\') { out[o++] = '\'; out[o++] = ch; }
+    else if ((unsigned char)ch < 0x20) { out[o++] = ' '; }
+    else out[o++] = ch;
+  }
+  out[o] = 0;
+}
+
+// ---- the phone page --------------------------------------------------------
+// One self-contained page served by the clock itself, so a phone joined to the
+// setup access point (or the house network) can drive the same menu, the same
+// four home screens and the same two lists without the internet existing.
+static void handle_phone_page() {
+  cors();
+  server.send(200, "text/html",
+    "<!doctype html><html><head><meta charset=utf-8>"
+    "<meta name=viewport content='width=device-width,initial-scale=1'>"
+    "<title>4SQUARE remote</title><style>"
+    "body{font:16px system-ui,sans-serif;background:#0b0d10;color:#e9ecf1;margin:0;padding:18px}"
+    "h1{font-size:18px;letter-spacing:.14em;margin:0 0 4px}"
+    "small{color:#8b93a1}"
+    ".scr{background:#14181e;border:1px solid #262c36;border-radius:12px;padding:14px;margin:14px 0;min-height:96px}"
+    ".row{padding:4px 0}.row.sel{color:#5bd9a6;font-weight:600}"
+    ".pad{display:grid;grid-template-columns:1fr 1fr;gap:10px}"
+    "button{background:#1d232c;color:#e9ecf1;border:1px solid #303845;border-radius:10px;padding:14px;font-size:15px}"
+    "button:active{background:#2a3340}"
+    "input{background:#14181e;color:#e9ecf1;border:1px solid #303845;border-radius:8px;padding:10px;width:100%;box-sizing:border-box}"
+    ".chip{display:inline-block;background:#1d232c;border:1px solid #303845;border-radius:999px;padding:6px 12px;margin:4px 4px 0 0}"
+    "</style></head><body>"
+    "<h1>4SQUARE</h1><small id=st>connecting</small>"
+    "<div class=scr><div id=title><b>menu</b></div><div id=rows></div></div>"
+    "<div class=pad>"
+    "<button onclick=k('back')>BACK</button><button onclick=k('up')>UP</button>"
+    "<button onclick=k('set')>SET</button><button onclick=k('down')>DOWN</button>"
+    "</div>"
+    "<p><button onclick=k('open')>OPEN MENU</button> <button onclick=k('close')>CLOSE</button></p>"
+    "<h3>Home screens</h3><div class=pad>"
+    "<button onclick=home(0)>Screen 1</button><button onclick=home(1)>Screen 2</button>"
+    "<button onclick=home(2)>Screen 3</button><button onclick=home(3)>Screen 4</button></div>"
+    "<h3>Tickers</h3><div id=tk></div>"
+    "<p><input id=nt placeholder='AAPL'> <button onclick=addt()>Add ticker</button></p>"
+    "<h3>Teams</h3><div id=tm></div>"
+    "<p><input id=nm placeholder='NFL-DET'> <button onclick=addm()>Add team</button></p>"
+    "<p><button onclick=fetch('/api/portal',{method:'POST'})>Turn on setup Wi-Fi</button></p>"
+    "<script>"
+    "async function j(u,o){const r=await fetch(u,o);return r.json()}"
+    "async function draw(){try{const m=await j('/api/menu');"
+    "document.getElementById('st').textContent=m.open?'menu open':'showing the clock';"
+    "document.getElementById('title').innerHTML='<b>'+m.title+'</b> '+(m.value||'');"
+    "document.getElementById('rows').innerHTML=m.items.map((t,i)=>"
+    "'<div class="row'+(i==m.row?' sel':'')+'">'+(i==m.row?'> ':'&nbsp;&nbsp;')+t+'</div>').join('');"
+    "const l=await j('/api/lists');"
+    "document.getElementById('tk').innerHTML=(l.tickers?l.tickers.split(','):[]).map((t,i)=>"
+    "'<span class=chip onclick=delt('+i+')>'+t+' x</span>').join('')||'<small>'+l.quote_state+'</small>';"
+    "document.getElementById('tm').innerHTML=(l.teams?l.teams.split(','):[]).map((t,i)=>"
+    "'<span class=chip onclick=delm('+i+')>'+t+' x</span>').join('')||'<small>'+l.score_state+'</small>';"
+    "}catch(e){document.getElementById('st').textContent='no answer from the clock'}}"
+    "function k(a){const q=(a=='open'||a=='close')?a+'=1':'key='+a;"
+    "fetch('/api/menu?'+q,{method:'POST'}).then(draw)}"
+    "function home(i){fetch('/api/homes?idx='+i+'&use=1',{method:'POST'}).then(draw)}"
+    "function addt(){fetch('/api/lists?add_ticker='+encodeURIComponent(nt.value),{method:'POST'}).then(()=>{nt.value='';draw()})}"
+    "function delt(i){fetch('/api/lists?del_ticker='+i,{method:'POST'}).then(draw)}"
+    "function addm(){fetch('/api/lists?add_team='+encodeURIComponent(nm.value),{method:'POST'}).then(()=>{nm.value='';draw()})}"
+    "function delm(i){fetch('/api/lists?del_team='+i,{method:'POST'}).then(draw)}"
+    "draw();setInterval(draw,2500);"
+    "</script></body></html>");
+}
+
+static void handle_menu() {
+  {
+    if (server.hasArg("open"))  extras_menu_open();
+    if (server.hasArg("close")) extras_menu_close();
+    const String k = server.arg("key");
+    if (k.length()) {
+      if (!extras_menu_active()) extras_menu_open();
+      if (k == "up")   extras_menu_key(2);
+      if (k == "down") extras_menu_key(3);
+      if (k == "set")  extras_menu_key(1);
+      if (k == "back") extras_menu_key(0);
+    }
+  }
+  String body = "{"ok":true,"open":";
+  body += extras_menu_active() ? "true" : "false";
+  char esc[80];
+  json_escape(extras_menu_title(), esc, sizeof esc);
+  body += ","title":""; body += esc; body += """;
+  body += ","row":";   body += (int)extras_menu_row();
+  body += ","count":"; body += (int)extras_menu_count();
+  json_escape(extras_menu_value(), esc, sizeof esc);
+  body += ","value":""; body += esc; body += "","items":[";
+  const uint8_t n = extras_menu_count();
+  for (uint8_t i = 0; i < n && i < 24; i++) {
+    json_escape(extras_menu_label(i), esc, sizeof esc);
+    if (i) body += ",";
+    body += """; body += esc; body += """;
+  }
+  body += "]}";
+  send_json(200, body.c_str());
+}
+
+static void handle_homes() {
+  {
+    const uint8_t idx = (uint8_t)constrain(server.arg("idx").toInt(), 0, 3);
+    if (server.hasArg("mode")) extras_home_set_mode(idx, (uint8_t)server.arg("mode").toInt());
+    if (server.hasArg("slot"))
+      extras_home_set(idx, (uint8_t)constrain(server.arg("slot").toInt(), 0, 3),
+                      (uint8_t)server.arg("w").toInt(),
+                      (uint8_t)server.arg("s").toInt(),
+                      (uint8_t)server.arg("ov").toInt());
+    if (server.hasArg("store")) extras_home_store(idx);
+    if (server.hasArg("use"))   extras_home_apply(idx);
+  }
+  String body = "{"ok":true,"active":";
+  body += (int)extras_home_active();
+  body += ","screens":[";
+  for (uint8_t i = 0; i < 4; i++) {
+    if (i) body += ",";
+    body += "{"mode":"; body += (int)extras_home_mode(i); body += ","slots":[";
+    for (uint8_t sl = 0; sl < 4; sl++) {
+      uint8_t w = 0, sub = 0, ov = 0;
+      extras_home_get(i, sl, &w, &sub, &ov);
+      if (sl) body += ",";
+      body += "["; body += (int)w; body += ","; body += (int)sub; body += ",";
+      body += (int)ov; body += "]";
+    }
+    body += "]}";
+  }
+  body += "]}";
+  send_json(200, body.c_str());
+}
+
+static void handle_lists() {
+  {
+    if (server.hasArg("add_ticker")) extras_ticker_add(server.arg("add_ticker").c_str());
+    if (server.hasArg("del_ticker")) extras_ticker_remove((uint8_t)server.arg("del_ticker").toInt());
+    if (server.hasArg("add_team"))   extras_team_add(server.arg("add_team").c_str());
+    if (server.hasArg("del_team"))   extras_team_remove((uint8_t)server.arg("del_team").toInt());
+    mk_next_ms = millis();   // refresh both feeds against the new lists
+    sp_next_ms = millis();
+  }
+  String body = "{"ok":true,"tickers":"";
+  body += extras_ticker_csv();
+  body += "","teams":"";
+  body += extras_team_csv();
+  body += "","quote_state":"";
+  body += extras_feed_reason(2);
+  body += "","score_state":"";
+  body += extras_feed_reason(3);
+  body += ""}";
+  send_json(200, body.c_str());
+}
+
+static void handle_portal_switch() {
+  send_json(200, "{"ok":true,"portal":true}");
+  server.handleClient();
+  webcfg_portal_open();
+}
+
 void webcfg_begin() {
   if (started) return;
   started = true;
@@ -1197,6 +1498,15 @@ void webcfg_begin() {
   server.on("/api/wifi", HTTP_GET,  handle_wifi_read);
   server.on("/api/wifi", HTTP_POST, handle_wifi_save);
   server.on("/api/wifi/forget", HTTP_POST, handle_wifi_forget);
+  server.on("/api/menu", HTTP_GET,  handle_menu);
+  server.on("/api/menu", HTTP_POST, handle_menu);
+  server.on("/api/homes", HTTP_GET,  handle_homes);
+  server.on("/api/homes", HTTP_POST, handle_homes);
+  server.on("/api/lists", HTTP_GET,  handle_lists);
+  server.on("/api/lists", HTTP_POST, handle_lists);
+  server.on("/api/portal", HTTP_GET,  handle_portal_switch);
+  server.on("/api/portal", HTTP_POST, handle_portal_switch);
+  server.on("/m", HTTP_GET, handle_phone_page);
   server.on("/", HTTP_GET, handle_portal_root);
   server.on("/setup", HTTP_GET, handle_portal_root);
   server.on("/api/update", HTTP_POST,
@@ -1262,11 +1572,24 @@ static bool host_resolves(uint8_t which) {
   return false;
 }
 
-/** A TLS handshake needs tens of kilobytes; say so rather than failing blind. */
+/**
+ * A TLS handshake needs tens of kilobytes; say so rather than failing blind.
+ *
+ * 45 KB was too close to the line. mbedtls allocates its record buffers and
+ * the certificate/session state in stages, so a handshake begun at 46 KB free
+ * can still hit an allocation failure part-way through - and an allocation
+ * failure inside the TLS stack is one of the ways this clock rebooted instead
+ * of simply reporting a failed fetch. Refuse below 60 KB and try later; the
+ * panel keeps its cached value either way.
+ */
 static bool enough_heap(uint8_t which) {
-  if (ESP.getFreeHeap() >= 45000u) return true;
+  const uint32_t free_now = (uint32_t)ESP.getFreeHeap();
+  const uint32_t biggest  = (uint32_t)ESP.getMaxAllocHeap();
+  // Fragmentation matters as much as the total: TLS wants one large block.
+  if (free_now >= 60000u && biggest >= 20000u) return true;
   extras_feed_note(which, "LOW MEMORY");
-  Serial.printf("# feed: only %u bytes free, skipping fetch\n", (unsigned)ESP.getFreeHeap());
+  Serial.printf("# feed: %lu bytes free (largest block %lu), skipping fetch\n",
+                (unsigned long)free_now, (unsigned long)biggest);
   return false;
 }
 
@@ -1312,6 +1635,8 @@ static void linkedin_tick() {
   const uint32_t now = millis();
   if (!remote_read_ready(now, 0)) return;
   if ((int32_t)(now - li_next_ms) < 0) { note_wait(0, now, li_next_ms); return; }
+  if (!feed_slot_free(now)) return;   // another feed is using the radio
+  feed_slot_take(now);
   li_next_ms = now + 15u * 60u * 1000u;
   extras_feed_note(0, "FETCHING");
   if (!host_resolves(0) || !enough_heap(0)) { li_next_ms = now + 30000u; return; }
@@ -1335,7 +1660,9 @@ static void linkedin_tick() {
   // DNS, TLS, headers, and body reads are all synchronous in HTTPClient. Keep
   // the loop watchdog out of this finite background transaction; otherwise a
   // slow DNS/TLS exchange can reset the whole clock seconds after startup.
-  disableLoopWDT();
+  // The guard restores the watchdog on EVERY exit from here on, including the
+  // early returns that previously left it off for the rest of the run.
+  WdtPause wdt;
   const int code = http.GET();
   if (code == 200) {
     const String body = http.getString();
@@ -1343,14 +1670,18 @@ static void linkedin_tick() {
     const long followers = json_long(body, "\"followers\":", &a);
     const long gained    = json_long(body, "\"gained7d\":", &b);
     if (a) {
-      extras_set_linkedin((int32_t)followers, (int32_t)(b ? gained : 0));
+      // The app omits gained7d entirely when it has no honest seven-day
+      // figure. Passing that along as 0 is what made the panel read "+0";
+      // instead the weekly number keeps its last real value, or shows a dash.
+      extras_set_linkedin((int32_t)followers, (int32_t)gained, b);
       extras_feed_ok(0);
     } else {
       // A 200 with no number in it: the app answered, LinkedIn had nothing.
       extras_feed_note(0, "NO COUNT YET");
       li_next_ms = now + 60u * 1000u;
     }
-    Serial.printf("# linkedin: %ld followers (+%ld)\n", followers, gained);
+    Serial.printf("# linkedin: %ld followers (+%ld%s)\n", followers, gained,
+                  b ? "" : " unknown");
   } else {
     Serial.printf("# linkedin fetch failed: %d\n", code);
     note_http_error(0, code);
@@ -1358,7 +1689,6 @@ static void linkedin_tick() {
     li_next_ms = now + 60u * 1000u;
   }
   http.end();
-  enableLoopWDT();
 }
 
 // ---- the forecast ----------------------------------------------------------
@@ -1375,6 +1705,8 @@ static void weather_tick() {
   const uint32_t now = millis();
   if (!remote_read_ready(now, 1)) return;
   if ((int32_t)(now - wx_next_ms) < 0) { note_wait(1, now, wx_next_ms); return; }
+  if (!feed_slot_free(now)) return;
+  feed_slot_take(now);
   wx_next_ms = now + 20u * 60u * 1000u;
   extras_feed_note(1, "FETCHING");
   if (!host_resolves(1) || !enough_heap(1)) { wx_next_ms = now + 30000u; return; }
@@ -1392,7 +1724,7 @@ static void weather_tick() {
   http.setReuse(false);
   http.setConnectTimeout(8000);
   http.setTimeout(12000);
-  disableLoopWDT();
+  WdtPause wdt;
   const int code = http.GET();
   if (code == 200) {
     const String body = http.getString();
@@ -1425,7 +1757,106 @@ static void weather_tick() {
     wx_next_ms = now + 60u * 1000u;
   }
   http.end();
-  enableLoopWDT();
+}
+
+// ---- quotes and scores -----------------------------------------------------
+// The clock never parses a market or sports feed. It sends its two lists to the
+// app, which aggregates and answers in a line format a hundred bytes of C can
+// read: "AAPL|23412|-125" and "NFL-DET|DET 21|GB 17|Q3 4:12".
+static const char *const HOST_BASE =
+  "https://project--93f6b6d0-48fb-4dbe-87b6-455b65129623.lovable.app";
+
+static bool feed_get_lines(const String &url, uint8_t which, String *out) {
+  if (!host_resolves(which) || !enough_heap(which)) return false;
+  WiFiClientSecure tls;
+  tls.setInsecure();
+  tls.setTimeout(12);
+  tls.setHandshakeTimeout(12);
+  HTTPClient http;
+  if (!http.begin(tls, url)) { extras_feed_note(which, "BAD URL"); return false; }
+  http.setReuse(false);
+  http.setConnectTimeout(8000);
+  http.setTimeout(12000);
+  WdtPause wdt;
+  const int code = http.GET();
+  bool ok = false;
+  if (code == 200) { *out = http.getString(); ok = true; }
+  else { note_http_error(which, code); }
+  http.end();
+  return ok;
+}
+
+static String field(const String &line, int idx) {
+  int from = 0;
+  for (int i = 0; i < idx; i++) {
+    const int bar = line.indexOf('|', from);
+    if (bar < 0) return String("");
+    from = bar + 1;
+  }
+  const int bar = line.indexOf('|', from);
+  return bar < 0 ? line.substring(from) : line.substring(from, bar);
+}
+
+static void market_tick() {
+  if (updating) return;
+  const uint32_t now = millis();
+  if (extras_ticker_count() == 0) { extras_feed_note(2, "NO TICKERS"); return; }
+  if (!remote_read_ready(now, 2)) return;
+  if ((int32_t)(now - mk_next_ms) < 0) { note_wait(2, now, mk_next_ms); return; }
+  if (!feed_slot_free(now)) return;
+  feed_slot_take(now);
+  mk_next_ms = now + 5u * 60u * 1000u;      // quotes every five minutes
+  extras_feed_note(2, "FETCHING");
+  String url = String(HOST_BASE) + "/api/public/market?syms=" + extras_ticker_csv();
+  String body;
+  if (!feed_get_lines(url, 2, &body)) { mk_next_ms = now + 60000u; return; }
+  int at = 0, got = 0;
+  while (at < (int)body.length()) {
+    int nl = body.indexOf('
+', at);
+    if (nl < 0) nl = body.length();
+    const String line = body.substring(at, nl);
+    at = nl + 1;
+    if (line.length() < 3) continue;
+    const String sym = field(line, 0);
+    if (!sym.length()) continue;
+    extras_set_quote(sym.c_str(), (int32_t)field(line, 1).toInt(),
+                     (int32_t)field(line, 2).toInt());
+    got++;
+  }
+  if (got) extras_feed_ok(2);
+  else { extras_feed_note(2, "NO QUOTES"); mk_next_ms = now + 60000u; }
+}
+
+static void sports_tick() {
+  if (updating) return;
+  const uint32_t now = millis();
+  if (extras_team_count() == 0) { extras_feed_note(3, "NO TEAMS"); return; }
+  if (!remote_read_ready(now, 3)) return;
+  if ((int32_t)(now - sp_next_ms) < 0) { note_wait(3, now, sp_next_ms); return; }
+  if (!feed_slot_free(now)) return;
+  feed_slot_take(now);
+  sp_next_ms = now + 3u * 60u * 1000u;      // scores every three minutes
+  extras_feed_note(3, "FETCHING");
+  String url = String(HOST_BASE) + "/api/public/sports?teams=" + extras_team_csv();
+  String body;
+  if (!feed_get_lines(url, 3, &body)) { sp_next_ms = now + 60000u; return; }
+  int at = 0, got = 0;
+  while (at < (int)body.length()) {
+    int nl = body.indexOf('
+', at);
+    if (nl < 0) nl = body.length();
+    const String line = body.substring(at, nl);
+    at = nl + 1;
+    if (line.length() < 3) continue;
+    const String id = field(line, 0);
+    if (!id.length()) continue;
+    extras_set_score(id.c_str(), field(line, 1).c_str(), field(line, 2).c_str(),
+                     field(line, 3).c_str());
+    got++;
+  }
+  if (got) extras_feed_ok(3);
+  else { extras_feed_note(3, "NO GAMES"); sp_next_ms = now + 60000u; }
 }
 
 void webcfg_tick() {
@@ -1465,7 +1896,15 @@ void webcfg_tick() {
   // Also pump here for compatibility with existing forks. The keeper now owns
   // the guaranteed schedule; the per-feed due timestamps prevent duplicate
   // requests when both call sites run in the same loop.
+  //
+  // ONE FETCH PER PASS. feed_in_pass closes the door behind the first feed
+  // that starts, so the other three wait for the next pass instead of chaining
+  // four blocking TLS sessions back to back with the server unserviced.
+  feed_in_pass = false;
   linkedin_tick();
   weather_tick();
+  market_tick();
+  sports_tick();
+  feed_in_pass = false;
 }
 #endif  // !DEMO_BUILD
