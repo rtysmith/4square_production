@@ -47,7 +47,7 @@
 #define FOURSQUARE_BUILD_ID "unknown"
 #endif
 
-#define WEBCFG_API 26  // 26 = no setup reboot loop, one service pump, safer radio recovery
+#define WEBCFG_API 27  // 27 = full-power join, boot screen always hands over
 
 static WebServer  server(80);
 static bool       started  = false;
@@ -550,9 +550,10 @@ static void wifi_keeper_start_join(uint32_t now, bool reset_radio) {
   WiFi.persistent(false);
   WiFi.setSleep(false);
   WiFi.setAutoReconnect(false);
-  // Start conservatively to reduce the association/DHCP current spike. Raise
-  // power only after repeated failures indicate that more range may help.
-  WiFi.setTxPower(wifi_failures >= 2 ? WIFI_POWER_17dBm : WIFI_POWER_11dBm);
+  // Full power for every join. 11 dBm was tried here and is too weak once the
+  // four panels are drawing current: the clock associated slowly or not at all
+  // and then sat on the boot screen forever.
+  WiFi.setTxPower(WIFI_POWER_17dBm);
   // Some routers refuse a DHCP request with an empty client hostname.
   WiFi.setHostname("foursquare-revo");
   // Clear a stale station address and restart the DHCP client for real. Calling
