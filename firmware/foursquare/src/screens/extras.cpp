@@ -69,6 +69,10 @@ static void x_bar(GFXcanvas1 &c, int16_t y, int16_t h, uint8_t pct) {
 // layout takes over anyway (the Wi-Fi panel keeps reporting) so a clock on a
 // dead network still tells the time.
 static const uint32_t SPLASH_MIN_MS   = 2500u;
+// SAFETY VALVE: a clock that cannot reach the network must still be a clock.
+// If no address arrives within five minutes, hand over to the saved layout
+// anyway; the Wi-Fi panel keeps reporting the recovery step from there.
+static const uint32_t SPLASH_MAX_MS   = 5u * 60u * 1000u;
 // Once an IP arrives, show the "we are live" boot cards for a full ten seconds
 // so the address and mDNS name can actually be read off the clock.
 static const uint32_t SPLASH_READY_MS = 10000u;
@@ -105,6 +109,11 @@ bool extras_splash_active() {
     }
   } else {
     splash_ready_at = 0;
+    if (now >= SPLASH_MAX_MS) {
+      splash_done = true;
+      splash_done_at = now ? now : 1u;
+      return false;
+    }
   }
   return true;
 }
