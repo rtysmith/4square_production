@@ -37,6 +37,8 @@ enum XWidget : uint8_t {
   X_DATELINE,     // weekday, day and month together, in one panel
   X_WEATHER,      // outside: icon, now, today's high, chance of rain
   X_CREDITS,      // software version + who built it
+  X_STOCK,        // the saved ticker list, one symbol at a time
+  X_SPORTS,       // the followed teams' live score and state
   X_LAST
 
 };
@@ -131,8 +133,12 @@ void extras_wide_draw(GFXcanvas1 &c, uint8_t id, uint8_t slot, uint16_t frame);
 // and high/low widgets read.
 void extras_tick(uint32_t now_ms, int16_t temp_c10, uint8_t rh, bool sht_ok,
                  uint8_t hour);
-void extras_set_linkedin(int32_t followers, int32_t gained7d);
+// week_known says whether the weekly gain in this call is a real number. When
+// it is false the follower total still updates, but the 7-day figure keeps
+// whatever it last knew and draws a dash rather than a confident "+0".
+void extras_set_linkedin(int32_t followers, int32_t gained7d, bool week_known = true);
 bool extras_linkedin_valid();
+bool extras_linkedin_week_valid();
 int32_t extras_linkedin_followers();
 int32_t extras_linkedin_gained();
 
@@ -159,6 +165,64 @@ int32_t extras_feed_age_min(uint8_t which);
 // network outage never replaces them with blanks; they remain available while
 // the connection keeper recovers, including outages longer than two hours.
 void extras_cache_restore();
+
+// ---- the four home screens -------------------------------------------------
+// Each of the four buttons on the back owns a home screen. A home screen is
+// either a saved 2x2 layout of its own (mode 0) or one of the firmware's own
+// pages (mode 1, which falls back to the button map, so the factory
+// clock/sensors/markets/animations arrangement is still the default).
+void    extras_home_load();
+uint8_t extras_home_active();
+uint8_t extras_home_mode(uint8_t idx);
+void    extras_home_set_mode(uint8_t idx, uint8_t mode);
+void    extras_home_apply(uint8_t idx);
+void    extras_home_store(uint8_t idx);
+void    extras_home_get(uint8_t idx, uint8_t slot, uint8_t *w, uint8_t *s, uint8_t *ov);
+void    extras_home_set(uint8_t idx, uint8_t slot, uint8_t w, uint8_t s, uint8_t ov);
+/** A short press on button i. True when it was fully handled here. */
+bool    extras_button_press(uint8_t i);
+
+// ---- the menu on the glass -------------------------------------------------
+// Hold any button for a second and a half and the four panels become a menu:
+// UP/DOWN (right side) move, SET (bottom left) picks, MODE (top left) goes
+// back. Everything the clock can be told over HTTP can also be reached here.
+bool        extras_menu_active();
+void        extras_menu_open();
+void        extras_menu_close();
+void        extras_menu_key(uint8_t button);
+void        extras_menu_draw(GFXcanvas1 &c);
+const char *extras_menu_title();
+const char *extras_menu_label(uint8_t row);
+const char *extras_menu_value();
+uint8_t     extras_menu_row();
+uint8_t     extras_menu_count();
+
+// ---- tickers and teams -----------------------------------------------------
+// Both lists live in flash, are edited from the menu or the app, and are sent
+// to the app's aggregating endpoint so the clock never parses a market feed.
+uint8_t     extras_ticker_count();
+const char *extras_ticker(uint8_t i);
+const char *extras_ticker_csv();
+bool        extras_ticker_add(const char *sym);
+void        extras_ticker_remove(uint8_t i);
+/** price in cents, change in hundredths of a percent. */
+void        extras_set_quote(const char *sym, int32_t price_c, int32_t chg_pct100);
+
+uint8_t     extras_team_count();
+const char *extras_team(uint8_t i);
+const char *extras_team_csv();
+bool        extras_team_add(const char *id);
+void        extras_team_remove(uint8_t i);
+/** One followed team's line: "DET 21", "GB 17", "Q3 4:12". */
+void        extras_set_score(const char *id, const char *home, const char *away,
+                             const char *state);
+
+// Slowly walk the drawing of the derived screens a few pixels so a static
+// panel cannot burn itself into the glass. Off returns everything to 0,0.
+void    extras_set_autooffset(bool on);
+bool    extras_autooffset();
+
+
 
 // ---- what the four buttons on the back do ----------------------------------
 // The mapping used to be a hardcoded switch in ui.cpp:
