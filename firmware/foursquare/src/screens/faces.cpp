@@ -1339,6 +1339,7 @@ static void draw_numeric(GFXcanvas1 &c, uint8_t style, uint8_t val,
 
 void face_render(GFXcanvas1 &c, uint8_t w, uint8_t s, uint8_t ov,
                  const FaceData &d) {
+  if (extras_menu_active()) { extras_menu_draw(c); return; }
   if (extras_splash_active()) { extras_splash_draw(c); return; }
         if (!extras_is_widget(w) && ov && (((ov & 0x0F) >= 4) || (ov & 0xF0))) {
     face_render(c, w, s, 0, d);
