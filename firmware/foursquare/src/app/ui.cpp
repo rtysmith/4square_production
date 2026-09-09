@@ -197,6 +197,10 @@ enum Ev : uint8_t { EV_NONE = 0, EV_SHORT, EV_LONG, EV_REPEAT };
 
 static const uint32_t UI_LONG_MS = 700;
 
+// A hold this long on any button opens the on-screen menu. Long enough
+// that the existing 700 ms long-press still means what it always did.
+static const uint32_t UI_MENU_HOLD_MS = 1500;
+
 // How long MODE has to stay down for a full reset. Deliberately far past
 // any hold a person makes by accident.
 static const uint32_t UI_RESET_HOLD_MS = 20000;
@@ -266,6 +270,14 @@ static Ev poll_btn(uint8_t i, uint32_t now) {
   // setup access point. This never returns.
   if (raw && b.down && i == 0 && now - b.t_down >= UI_RESET_HOLD_MS) {
     webcfg_factory_reset();
+  }
+#endif
+
+#ifndef DEMO_BUILD
+  // Any button, held: bring up the menu on all four panels.
+  if (raw && b.down && !extras_menu_active() &&
+      now - b.t_down >= UI_MENU_HOLD_MS) {
+    extras_menu_open();
   }
 #endif
 
@@ -530,9 +542,11 @@ bool ui_input(uint32_t now) {
     if (e == EV_SHORT) {
       // The button map is a setting now, not a switch. Default is still
         // MODE clock / SET sensors / UP markets / DOWN animations.
-        const uint8_t target = btn_page_for(i);
-        if (target == PG_SETTINGS) enter_settings(now);
-        else                       select_page(target, now);
+        if (!extras_button_press(i)) {
+          const uint8_t target = btn_page_for(i);
+          if (target == PG_SETTINGS) enter_settings(now);
+          else                       select_page(target, now);
+        }
       continue;
     }
 
@@ -564,9 +578,11 @@ void ui_button(uint8_t i, bool long_press) {
   } else {
     // The button map is a setting now, not a switch. Default is still
         // MODE clock / SET sensors / UP markets / DOWN animations.
-        const uint8_t target = btn_page_for(i);
-        if (target == PG_SETTINGS) enter_settings(now);
-        else                       select_page(target, now);
+        if (!extras_button_press(i)) {
+          const uint8_t target = btn_page_for(i);
+          if (target == PG_SETTINGS) enter_settings(now);
+          else                       select_page(target, now);
+        }
   }
 
   Serial.print("# page "); Serial.print(page_name(page));
