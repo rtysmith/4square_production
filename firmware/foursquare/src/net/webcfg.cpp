@@ -263,8 +263,11 @@ static char     portal_ip_str[20] = "192.168.4.1";
 static const char PORTAL_SSID[] = "4SQUARE-SETUP";
 // Never a dead end: if credentials exist but the portal opened anyway, reboot
 // after five minutes and give the real network another go.
-static const uint32_t PORTAL_RETRY_MS = 5u * 60u * 1000u;
-static const uint8_t  WIFI_MAX_COLD_ATTEMPTS = 3;
+static const uint32_t PORTAL_RETRY_MS = 90u * 1000u;
+// Only give up and ask a human after a long run of failures. A busy router or
+// a slow DHCP server must never push a clock that already knows the network
+// into setup mode.
+static const uint8_t  WIFI_MAX_COLD_ATTEMPTS = 12;
 
 static void wifi_creds_load() {
   if (cred_loaded) return;
@@ -488,8 +491,9 @@ static void wifi_check_giveup() {
   if (portal_active) return;
   if (wifi_seen_up || wifi_last_up_ms != 0) return;  // it worked once this boot
   if (wifi_failures < WIFI_MAX_COLD_ATTEMPTS) return;
-  if (cred_stored) wifi_creds_clear();
-  wifi_portal_start("three failed attempts from a cold start");
+  // Never throw away credentials that were typed in or compiled in: the portal
+  // is a temporary detour, and the keeper returns to them on its own.
+  wifi_portal_start("many failed attempts from a cold start");
 }
 
 static void wifi_keeper_start_join(uint32_t now, bool reset_radio) {
