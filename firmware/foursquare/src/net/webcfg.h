@@ -44,7 +44,7 @@ uint32_t webcfg_prev_uptime_s();
 uint32_t webcfg_boot_count();
 
 
-// SETUP MODE. With no saved network — or after three failed joins from a cold
+// SETUP MODE. With no saved network — or after repeated failed joins from a cold
 // boot — the clock stops being a station and becomes its own access point so a
 // phone or laptop can hand it credentials. Stage 7 means "setup access point".
 bool webcfg_wifi_portal();
