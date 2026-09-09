@@ -33,6 +33,17 @@ const char *webcfg_wifi_target_ssid();
 // 3 join timeout, 4 DHCP supplied no address, 5 radio unresponsive.
 uint8_t webcfg_wifi_failure();
 
+// WHY THE CLOCK CAME BACK. A reboot and a Wi-Fi drop look identical on the
+// glass, so the silicon's own reset reason is kept and shown: "POWER ON",
+// "CRASH", "TASK WATCHDOG", "POWER DIP" (brownout), "SOFTWARE". The previous
+// run's length and the number of boots seen tell you whether it is settling
+// down or still cycling.
+const char *webcfg_reset_text();
+uint8_t  webcfg_reset_code();
+uint32_t webcfg_prev_uptime_s();
+uint32_t webcfg_boot_count();
+
+
 // SETUP MODE. With no saved network — or after three failed joins from a cold
 // boot — the clock stops being a station and becomes its own access point so a
 // phone or laptop can hand it credentials. Stage 7 means "setup access point".
@@ -44,6 +55,12 @@ const char *webcfg_portal_ip();
 // into the setup access point. The top-left MODE button held for twenty
 // seconds calls this; nothing else does.
 void webcfg_factory_reset();
+
+// Turn the setup access point on from the menu or the phone, without needing
+// the credentials to fail first.
+void webcfg_portal_open();
+// Drop the current association so the keeper immediately re-joins.
+void webcfg_wifi_rejoin();
 
 // True while an HTTP firmware upload is in flight, so the main loop can leave
 // the screens and the I2C bus alone.
