@@ -448,7 +448,6 @@ static void wifi_tick() {
     ui_env.rssi = WiFi.RSSI();
     ui_env.ota_ready = ota_up;
     ArduinoOTA.handle();
-    webcfg_tick();
     return;
   }
   uint32_t now = millis();
