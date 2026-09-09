@@ -47,7 +47,7 @@
 #define FOURSQUARE_BUILD_ID "unknown"
 #endif
 
-#define WEBCFG_API 25  // 25 = restart forensics, one-at-a-time feeds, steadier radio power
+#define WEBCFG_API 26  // 26 = no setup reboot loop, one service pump, safer radio recovery
 
 static WebServer  server(80);
 static bool       started  = false;
@@ -65,6 +65,9 @@ static const uint32_t UPDATE_STALL_MS = 30000;
 // the socket closed first; restarting inside the handler made a good install
 // look like a failed one.
 static uint32_t   pending_restart_ms = 0;
+// A request handler must not re-enter WebServer while it is already handling
+// that request. Portal activation is therefore completed on the next tick.
+static bool       portal_switch_pending = false;
 
 // ---- WHY DID IT RESTART? ---------------------------------------------------
 // A clock that reboots looks exactly like a clock that lost Wi-Fi: the panels
@@ -261,8 +264,10 @@ static uint32_t portal_since_ms = 0;
 static DNSServer portal_dns;
 static char     portal_ip_str[20] = "192.168.4.1";
 static const char PORTAL_SSID[] = "4SQUARE-SETUP";
-// Never a dead end: if credentials exist but the portal opened anyway, reboot
-// after five minutes and give the real network another go.
+// Never a dead end: if credentials exist but the portal opened anyway, leave
+// setup mode after a short pause and let the station state machine try again.
+// This used to reboot the whole ESP every 90 seconds, making a Wi-Fi or DHCP
+// problem look like a crashing clock and needlessly resetting all four panels.
 static const uint32_t PORTAL_RETRY_MS = 90u * 1000u;
 // Only give up and ask a human after a long run of failures. A busy router or
 // a slow DHCP server must never push a clock that already knows the network
@@ -351,6 +356,38 @@ static void wifi_portal_start(const char *why) {
   webcfg_begin();
   Serial.printf("# wifi setup portal: join \"%s\" then open http://%s\n",
                 PORTAL_SSID, portal_ip_str);
+}
+
+// Leave the setup access point without rebooting the clock. The HTTP server is
+// kept alive and will bind to the station again once an address arrives; only
+// the radio and connection-state bookkeeping are reset.
+static void wifi_portal_retry_saved(uint32_t now) {
+  Serial.println("# wifi setup portal: retrying saved networks without rebooting");
+  portal_dns.stop();
+  WiFi.softAPdisconnect(true);
+  WiFi.disconnect(true, false);
+  WiFi.mode(WIFI_OFF);
+  delay(100);
+
+  portal_active = false;
+  portal_since_ms = 0;
+  wifi_seen_up = false;
+  wifi_joining = false;
+  wifi_failures = 0;
+  wifi_down_since_ms = now == 0 ? 1u : now;
+  wifi_join_since_ms = 0;
+  wifi_dhcp_since_ms = 0;
+  wifi_next_try_ms = now;
+  wifi_retry_started_ms = now;
+  wifi_last_up_ms = 0;
+  wifi_stable_since_ms = 0;
+  wifi_last_failure = 0;
+  wifi_have_bssid = false;
+  wifi_dhcp_retries = 0;
+  wifi_dhcp_kick_ms = 0;
+  wifi_scanning = false;
+  wifi_scan_done_ms = 0;
+  WiFi.mode(WIFI_STA);
 }
 
 // Stop and restart the station's DHCP client so the next association starts a
@@ -513,7 +550,9 @@ static void wifi_keeper_start_join(uint32_t now, bool reset_radio) {
   WiFi.persistent(false);
   WiFi.setSleep(false);
   WiFi.setAutoReconnect(false);
-  WiFi.setTxPower(WIFI_POWER_17dBm);
+  // Start conservatively to reduce the association/DHCP current spike. Raise
+  // power only after repeated failures indicate that more range may help.
+  WiFi.setTxPower(wifi_failures >= 2 ? WIFI_POWER_17dBm : WIFI_POWER_11dBm);
   // Some routers refuse a DHCP request with an empty client hostname.
   WiFi.setHostname("foursquare-revo");
   // Clear a stale station address and restart the DHCP client for real. Calling
@@ -582,12 +621,10 @@ void webcfg_wifi_keeper_tick() {
       Serial.flush();
       ESP.restart();
     }
-    // Credentials exist but we ended up here anyway: try them again rather
-    // than sitting in setup mode forever.
+    // Credentials exist but we ended up here anyway: return to the station
+    // state machine without restarting the clock or clearing its displays.
     if (net_have_any() && (uint32_t)(now - portal_since_ms) >= PORTAL_RETRY_MS) {
-      Serial.println("# wifi setup portal: retrying the saved network");
-      Serial.flush();
-      ESP.restart();
+      wifi_portal_retry_saved(now);
     }
     return;
   }
@@ -1242,7 +1279,7 @@ static void handle_portal_root() {
       "border:0;border-radius:8px;background:#3ddc84;color:#06210f}"
       "</style></head><body><h1>4square Wi-Fi setup</h1>"
       "<p>Enter the network the clock should join. It saves them, restarts and "
-      "connects. If it cannot join after three tries it comes back here.</p>"
+      "connects. If it cannot join after repeated tries it comes back here.</p>"
       "<form method=\"POST\" action=\"/api/wifi\">"
       "<label>Network name</label><input name=\"ssid\" value=\"");
   page += saved1;
@@ -1473,8 +1510,9 @@ static void handle_lists() {
 
 static void handle_portal_switch() {
   send_json(200, "{\"ok\":true,\"portal\":true}");
-  server.handleClient();
-  webcfg_portal_open();
+  // Do not call server.handleClient() recursively from inside its own request
+  // callback. Defer the radio transition until the outer handler has returned.
+  portal_switch_pending = true;
 }
 
 void webcfg_begin() {
@@ -1865,6 +1903,12 @@ void webcfg_tick() {
   if (!started) return;
   server.handleClient();
 
+  if (portal_switch_pending) {
+    portal_switch_pending = false;
+    webcfg_portal_open();
+    return;
+  }
+
   // The deferred reboot promised by /api/update and /api/restart. One extra
   // handleClient() above has already flushed and closed the reply socket.
   if (pending_restart_ms != 0 && (int32_t)(millis() - pending_restart_ms) >= 0) {
@@ -1895,10 +1939,8 @@ void webcfg_tick() {
   extras_tick(millis(), ui_env.sht_ok ? (int16_t)(ui_env.sht_c * 10.0f) : 0,
               ui_env.rh, ui_env.sht_ok, rtc_now(millis()).hour);
 
-  // Also pump here for compatibility with existing forks. The keeper now owns
-  // the guaranteed schedule; the per-feed due timestamps prevent duplicate
-  // requests when both call sites run in the same loop.
-  //
+  // The keeper is the single owner of this service pump. Keeping one owner
+  // prevents back-to-back network work and avoids unnecessary heap churn.
   // ONE FETCH PER PASS. feed_in_pass closes the door behind the first feed
   // that starts, so the other three wait for the next pass instead of chaining
   // four blocking TLS sessions back to back with the server unserviced.
