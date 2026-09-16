@@ -47,7 +47,7 @@
 #define FOURSQUARE_BUILD_ID "unknown"
 #endif
 
-#define WEBCFG_API 28  // 28 = LinkedIn panel adds indoor humidity history
+#define WEBCFG_API 29  // 29 = LinkedIn humidity footer always drawn
 
 static WebServer  server(80);
 static bool       started  = false;
