@@ -350,9 +350,9 @@ static void x_stale(GFXcanvas1 &c, uint8_t which, int32_t after_min) {
 
 
 // ===========================================================================
-// the rolling history — one sample a minute, an hour deep, plus today's range
+// the rolling history — one sample a minute, two hours deep, plus today's range
 // ===========================================================================
-static const uint8_t HIST_N = 60;
+static const uint8_t HIST_N = 120;
 struct History {
   int16_t  temp[HIST_N];
   uint8_t  rh[HIST_N];
@@ -541,7 +541,7 @@ void extras_tick(uint32_t now_ms, int16_t temp_c10, uint8_t rh, bool sht_ok,
   if (hist.filled < HIST_N) hist.filled++;
 }
 
-// The oldest sample we hold, which is an hour ago once the buffer has filled.
+// The oldest sample we hold, which is two hours ago once the buffer has filled.
 static bool hist_oldest(int16_t *temp, uint8_t *rh) {
   if (hist.filled < 2) return false;
   const uint8_t idx = (uint8_t)((hist.head + HIST_N - hist.filled) % HIST_N);
@@ -550,10 +550,10 @@ static bool hist_oldest(int16_t *temp, uint8_t *rh) {
   return true;
 }
 
-// A compact one-hour humidity trace for the LinkedIn footer. The scale follows
-// the readings we actually hold so even a subtle room change stays visible.
-// With only one sample there is a dot; after that the samples are joined oldest
-// to newest, left to right.
+// A compact two-hour humidity trace across the full bottom of the LinkedIn
+// panel. The scale follows the readings we actually hold so even a subtle room
+// change stays visible. With only one sample there is a dot; after that the
+// samples are joined oldest to newest, left to right.
 static void draw_rh_spark(GFXcanvas1 &c, int16_t x, int16_t y, int16_t w, int16_t h) {
   if (hist.filled == 0 || w < 2 || h < 2) return;
   uint8_t lo = 100, hi = 0;
@@ -600,7 +600,7 @@ static void draw_linkedin_humidity(GFXcanvas1 &c, const FaceData &d) {
   else           snprintf(t, sizeof t, "RH --");
   const int16_t y = (int16_t)(SAFE_Y0 + SAFE_H - 8);
   x_text(c, t, 1, y, SAFE_X0);
-  if (rh <= 100) draw_rh_spark(c, (int16_t)(SAFE_X0 + 24), y, 34, 7);
+  if (rh <= 100) draw_rh_spark(c, (int16_t)(SAFE_X0 + 24), y, (int16_t)(SAFE_W - 26), 7);
 }
 
 
@@ -1209,13 +1209,15 @@ void extras_face_render(GFXcanvas1 &c, uint8_t w, uint8_t ov, const FaceData &d)
       if (!li_valid) { x_why(c, "LINKEDIN", 0); draw_linkedin_humidity(c, d); break; }
       if (li_followers >= 10000) snprintf(b, sizeof b, "%ld.%ldk", (long)(li_followers / 1000), (long)((li_followers % 1000) / 100));
       else snprintf(b, sizeof b, "%ld", (long)li_followers);
-      // With a corner in play the pair is centred in the space ABOVE the
-      // overlay row rather than jammed against the top edge: pinning it high
-      // left the number floating with a hole under it, which is the thing that
-      // looked broken.
-      // This screen always owns its bottom row: indoor humidity and its real
-      // one-hour trace on the left, with the optional 7-day gain on the right.
-      x_center(c, "LINKEDIN", 1, (int16_t)(SAFE_Y0 + 3));
+      // Header row: "LINKEDIN" on the left, the weekly gain on the right so
+      // the two read as one caption. The big follower count stays centred, and
+      // the full-width two-hour humidity trace owns the bottom edge.
+      x_text(c, "LINKEDIN", 1, (int16_t)(SAFE_Y0 + 3), SAFE_X0);
+      char week_t[12];
+      if (!li_valid || !li_week_ok) snprintf(week_t, sizeof week_t, "+--");
+      else                         snprintf(week_t, sizeof week_t, "%+ld", (long)li_gained);
+      const int16_t week_w = (int16_t)(strlen(week_t) * 6 - 1);
+      x_text(c, week_t, 1, (int16_t)(SAFE_Y0 + 3), (int16_t)(SAFE_X0 + SAFE_W - week_w));
       x_center(c, b, 3, (int16_t)(SAFE_Y0 + 17));
       draw_linkedin_humidity(c, d);
       break;
@@ -1403,7 +1405,14 @@ void extras_face_render(GFXcanvas1 &c, uint8_t w, uint8_t ov, const FaceData &d)
   }
 
 
-  x_overlay(c, ov, d);
+  // X_LIFOLLOWERS renders the weekly gain on its own header line; don't
+  // duplicate it with an OV_LIWEEK corner overlay.
+  uint8_t ov_draw = ov;
+  if (w == X_LIFOLLOWERS) {
+    if ((ov_draw & 0x0F) == 4) ov_draw &= 0xF0;
+    if (((ov_draw >> 4) & 0x0F) == 4) ov_draw &= 0x0F;
+  }
+  x_overlay(c, ov_draw, d);
 }
 
 // ===========================================================================
