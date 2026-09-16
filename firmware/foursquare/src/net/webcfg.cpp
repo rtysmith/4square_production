@@ -47,7 +47,7 @@
 #define FOURSQUARE_BUILD_ID "unknown"
 #endif
 
-#define WEBCFG_API 27  // 27 = full-power join, boot screen always hands over
+#define WEBCFG_API 28  // 28 = LinkedIn panel adds indoor humidity history
 
 static WebServer  server(80);
 static bool       started  = false;
