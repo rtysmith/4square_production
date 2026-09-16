@@ -47,7 +47,7 @@
 #define FOURSQUARE_BUILD_ID "unknown"
 #endif
 
-#define WEBCFG_API 29  // 29 = LinkedIn humidity footer always drawn
+#define WEBCFG_API 31  // 31 = setup Wi-Fi stays up while someone is connected
 
 static WebServer  server(80);
 static bool       started  = false;
@@ -269,6 +269,11 @@ static const char PORTAL_SSID[] = "4SQUARE-SETUP";
 // This used to reboot the whole ESP every 90 seconds, making a Wi-Fi or DHCP
 // problem look like a crashing clock and needlessly resetting all four panels.
 static const uint32_t PORTAL_RETRY_MS = 90u * 1000u;
+// When a human deliberately opened setup from the menu or the app, give them
+// room to find the network and type a password: ten quiet minutes, and the
+// clock never walks away while a phone is actually joined to it.
+static const uint32_t PORTAL_MANUAL_MS = 10u * 60u * 1000u;
+static bool portal_manual = false;
 // Only give up and ask a human after a long run of failures. A busy router or
 // a slow DHCP server must never push a clock that already knows the network
 // into setup mode.
@@ -371,6 +376,7 @@ static void wifi_portal_retry_saved(uint32_t now) {
 
   portal_active = false;
   portal_since_ms = 0;
+  portal_manual = false;
   wifi_seen_up = false;
   wifi_joining = false;
   wifi_failures = 0;
@@ -624,7 +630,13 @@ void webcfg_wifi_keeper_tick() {
     }
     // Credentials exist but we ended up here anyway: return to the station
     // state machine without restarting the clock or clearing its displays.
-    if (net_have_any() && (uint32_t)(now - portal_since_ms) >= PORTAL_RETRY_MS) {
+    // Someone joined to the setup network is someone mid-setup, so the clock
+    // waits them out rather than pulling the page from under them.
+    if (WiFi.softAPgetStationNum() > 0) {
+      portal_since_ms = now == 0 ? 1u : now;
+    } else if (net_have_any() &&
+               (uint32_t)(now - portal_since_ms) >=
+                   (portal_manual ? PORTAL_MANUAL_MS : PORTAL_RETRY_MS)) {
       wifi_portal_retry_saved(now);
     }
     return;
@@ -1348,7 +1360,11 @@ void webcfg_factory_reset() {
 
 
 // ---- setup mode and rejoin on demand ---------------------------------------
-void webcfg_portal_open() { wifi_portal_start("asked for from the menu or the app"); }
+void webcfg_portal_open() {
+  wifi_portal_start("asked for from the menu or the app");
+  portal_manual = true;
+  portal_since_ms = millis() == 0 ? 1u : millis();
+}
 void webcfg_wifi_rejoin() { WiFi.disconnect(false, false); }
 
 // ---- the menu, the home screens and the two lists, over HTTP ---------------
