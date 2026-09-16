@@ -584,13 +584,24 @@ static void draw_rh_spark(GFXcanvas1 &c, int16_t x, int16_t y, int16_t w, int16_
 }
 
 static void draw_linkedin_humidity(GFXcanvas1 &c, const FaceData &d) {
-  if (d.humidity > 100) return;
-  char t[8];
-  snprintf(t, sizeof t, "%u%%", (unsigned)d.humidity);
+  // Always own the bottom-left corner of this panel. A live reading wins; if
+  // the sensor has not answered yet we fall back to the newest stored sample,
+  // and if there is nothing at all we say so rather than drawing nothing,
+  // which just looked like the feature was missing.
+  uint8_t rh = 255;
+  if (d.humidity <= 100) rh = d.humidity;
+  else if (hist.filled > 0) {
+    const uint8_t idx = (uint8_t)((hist.head + HIST_N - 1) % HIST_N);
+    if (hist.rh[idx] <= 100) rh = hist.rh[idx];
+  }
+  char t[10];
+  if (rh <= 100) snprintf(t, sizeof t, "%u%%", (unsigned)rh);
+  else           snprintf(t, sizeof t, "RH --");
   const int16_t y = (int16_t)(SAFE_Y0 + SAFE_H - 8);
   x_text(c, t, 1, y, SAFE_X0);
-  draw_rh_spark(c, (int16_t)(SAFE_X0 + 24), y, 34, 7);
+  if (rh <= 100) draw_rh_spark(c, (int16_t)(SAFE_X0 + 24), y, 34, 7);
 }
+
 
 // ===========================================================================
 // the maths behind the derived screens
