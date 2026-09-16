@@ -47,7 +47,7 @@
 #define FOURSQUARE_BUILD_ID "unknown"
 #endif
 
-#define WEBCFG_API 32  // 32 = wireless install survives slow/stuttering uploads
+#define WEBCFG_API 33  // 33 = LinkedIn panel header shows weekly gain; 2-hour humidity spark
 
 static WebServer  server(80);
 static bool       started  = false;
