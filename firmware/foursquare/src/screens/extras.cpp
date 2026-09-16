@@ -550,6 +550,48 @@ static bool hist_oldest(int16_t *temp, uint8_t *rh) {
   return true;
 }
 
+// A compact one-hour humidity trace for the LinkedIn footer. The scale follows
+// the readings we actually hold so even a subtle room change stays visible.
+// With only one sample there is a dot; after that the samples are joined oldest
+// to newest, left to right.
+static void draw_rh_spark(GFXcanvas1 &c, int16_t x, int16_t y, int16_t w, int16_t h) {
+  if (hist.filled == 0 || w < 2 || h < 2) return;
+  uint8_t lo = 100, hi = 0;
+  for (uint8_t i = 0; i < hist.filled; i++) {
+    const uint8_t idx = (uint8_t)((hist.head + HIST_N - hist.filled + i) % HIST_N);
+    const uint8_t v = hist.rh[idx];
+    if (v < lo) lo = v;
+    if (v > hi) hi = v;
+  }
+  // Keep a flat trace centred, and give small changes at least a 4% window.
+  if (hi <= lo) { lo = lo > 2 ? (uint8_t)(lo - 2) : 0; hi = hi < 98 ? (uint8_t)(hi + 2) : 100; }
+  else if ((uint8_t)(hi - lo) < 4) {
+    const uint8_t pad = (uint8_t)((4 - (hi - lo) + 1) / 2);
+    lo = lo > pad ? (uint8_t)(lo - pad) : 0;
+    hi = hi + pad < 100 ? (uint8_t)(hi + pad) : 100;
+  }
+  int16_t px = x, py = (int16_t)(y + h / 2);
+  for (uint8_t i = 0; i < hist.filled; i++) {
+    const uint8_t idx = (uint8_t)((hist.head + HIST_N - hist.filled + i) % HIST_N);
+    const int16_t nx = hist.filled == 1 ? (int16_t)(x + w - 1)
+      : (int16_t)(x + (long)i * (w - 1) / (hist.filled - 1));
+    const int16_t ny = (int16_t)(y + h - 1 -
+      (long)(hist.rh[idx] - lo) * (h - 1) / (hi - lo));
+    if (i == 0) c.drawPixel(nx, ny, 1);
+    else c.drawLine(px, py, nx, ny, 1);
+    px = nx; py = ny;
+  }
+}
+
+static void draw_linkedin_humidity(GFXcanvas1 &c, const FaceData &d) {
+  if (d.humidity > 100) return;
+  char t[8];
+  snprintf(t, sizeof t, "%u%%", (unsigned)d.humidity);
+  const int16_t y = (int16_t)(SAFE_Y0 + SAFE_H - 8);
+  x_text(c, t, 1, y, SAFE_X0);
+  draw_rh_spark(c, (int16_t)(SAFE_X0 + 24), y, 34, 7);
+}
+
 // ===========================================================================
 // the maths behind the derived screens
 // ===========================================================================
@@ -1159,15 +1201,11 @@ void extras_face_render(GFXcanvas1 &c, uint8_t w, uint8_t ov, const FaceData &d)
       // overlay row rather than jammed against the top edge: pinning it high
       // left the number floating with a hole under it, which is the thing that
       // looked broken.
-      if ((ov & 0x0F) != 0) {
-        x_center(c, "LINKEDIN", 1, (int16_t)(SAFE_Y0 + 3));
-        x_center(c, b, 3, (int16_t)(SAFE_Y0 + 17));
-      } else {
-        x_pair(c, "LINKEDIN", b, 4);
-        // Numbers that have stopped refreshing say so rather than quietly
-        // pretending to be current.
-        x_stale(c, 0, 45);
-      }
+      // This screen always owns its bottom row: indoor humidity and its real
+      // one-hour trace on the left, with the optional 7-day gain on the right.
+      x_center(c, "LINKEDIN", 1, (int16_t)(SAFE_Y0 + 3));
+      x_center(c, b, 3, (int16_t)(SAFE_Y0 + 17));
+      draw_linkedin_humidity(c, d);
       break;
     }
     case X_LIWEEK: {
