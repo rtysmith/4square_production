@@ -47,7 +47,7 @@
 #define FOURSQUARE_BUILD_ID "unknown"
 #endif
 
-#define WEBCFG_API 31  // 31 = setup Wi-Fi stays up while someone is connected
+#define WEBCFG_API 32  // 32 = wireless install survives slow/stuttering uploads
 
 static WebServer  server(80);
 static bool       started  = false;
@@ -1180,7 +1180,7 @@ static void update_stand_down() {
 
 static void handle_update_result() {
   const char *why = 0;
-  if (update_failed || Update.hasError())      why = "the board rejected the image";
+  if (update_failed || Update.hasError())      why = Update.errorString();
   else if (!updating)                          why = "no firmware data arrived";
   else if (update_written == 0)                why = "the upload was empty";
   else if (!update_finalized)                  why = "the image was cut short before the end";
@@ -1223,7 +1223,17 @@ static void handle_update_data() {
     // exists to protect the LDO with the screens lit — which they are not.
     disableLoopWDT();
     disp_all_off(true);
-    WiFi.setTxPower(WIFI_POWER_19_5dBm);
+    // WHY THE UPLOAD USED TO DIE PART WAY: two reasons, both fixed here.
+    // 1. WebServer gives up on a quiet socket after a few seconds. A phone or
+    //    Mac that pauses mid-multipart then looks like end-of-file, so the
+    //    image arrives short and Update.end() rejects it. Give the socket a
+    //    generous read window and turn off Nagle so small chunks flow.
+    // 2. Pushing TX to 19.5 dBm during a long transfer is a current spike on
+    //    a USB-powered board; a brownout there drops the association mid-file.
+    //    17 dBm is the level the clock associates and streams reliably at.
+    server.client().setNoDelay(true);
+    server.client().setTimeout(30000);
+    WiFi.setTxPower(WIFI_POWER_17dBm);
     if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
       update_failed = true;
       Update.printError(Serial);
@@ -1238,6 +1248,9 @@ static void handle_update_data() {
       Update.printError(Serial);
     } else {
       update_written += up.currentSize;
+      // Flash writes are blocking; hand the radio and TCP stack a slot between
+      // chunks so acknowledgements keep flowing and the window never closes.
+      delay(0);
     }
   } else if (up.status == UPLOAD_FILE_END) {
     if (!updating || update_failed) return;
