@@ -590,6 +590,7 @@ static void draw_linkedin_humidity(GFXcanvas1 &c, const FaceData &d) {
   // which just looked like the feature was missing.
   uint8_t rh = 255;
   if (d.humidity <= 100) rh = d.humidity;
+  else if (ui_env.sht_ok && ui_env.rh <= 100) rh = ui_env.rh;
   else if (hist.filled > 0) {
     const uint8_t idx = (uint8_t)((hist.head + HIST_N - 1) % HIST_N);
     if (hist.rh[idx] <= 100) rh = hist.rh[idx];
@@ -1205,7 +1206,7 @@ void extras_face_render(GFXcanvas1 &c, uint8_t w, uint8_t ov, const FaceData &d)
     }
     case X_LIFOLLOWERS: {
       // The panel is called LINKEDIN, whatever it is showing.
-      if (!li_valid) { x_why(c, "LINKEDIN", 0); break; }
+      if (!li_valid) { x_why(c, "LINKEDIN", 0); draw_linkedin_humidity(c, d); break; }
       if (li_followers >= 10000) snprintf(b, sizeof b, "%ld.%ldk", (long)(li_followers / 1000), (long)((li_followers % 1000) / 100));
       else snprintf(b, sizeof b, "%ld", (long)li_followers);
       // With a corner in play the pair is centred in the space ABOVE the
