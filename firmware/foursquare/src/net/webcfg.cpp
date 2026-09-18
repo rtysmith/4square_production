@@ -47,7 +47,7 @@
 #define FOURSQUARE_BUILD_ID "unknown"
 #endif
 
-#define WEBCFG_API 33  // 33 = LinkedIn panel header shows weekly gain; 2-hour humidity spark
+#define WEBCFG_API 34  // 34 = date-panel status strip and 14-day LinkedIn bars
 
 static WebServer  server(80);
 static bool       started  = false;
@@ -1062,6 +1062,20 @@ static void handle_extras() {
     extras_set_linkedin((int32_t)server.arg("followers").toInt(),
                         (int32_t)server.arg("gained").toInt(),
                         server.hasArg("gained"));
+  if (server.hasArg("daily")) {
+    const String daily = server.arg("daily");
+    int16_t values[14];
+    uint8_t count = 0;
+    int start = 0;
+    while (count < 14 && start <= (int)daily.length()) {
+      int comma = daily.indexOf(',', start);
+      if (comma < 0) comma = daily.length();
+      const String item = daily.substring(start, comma);
+      values[count++] = item == "x" ? -32768 : (int16_t)constrain(item.toInt(), 0L, 32767L);
+      start = comma + 1;
+    }
+    extras_set_linkedin_days(values, count);
+  }
   char body[128];
   snprintf(body, sizeof body,
            "{\"ok\":true,\"wide\":%d,\"followers\":%ld,\"gained7d\":%ld}",
@@ -1690,6 +1704,28 @@ static long json_long(const String &body, const char *key, bool *found) {
   return body.substring(at + (int)strlen(key)).toInt();
 }
 
+// Read the compact 14-item daily-gain array without allocating a JSON tree.
+// JSON null stays missing, so an absent snapshot never becomes a false zero.
+static void json_linkedin_days(const String &body) {
+  const char *key = "\"gained14d_series\":[";
+  int at = body.indexOf(key);
+  if (at < 0) return;
+  at += (int)strlen(key);
+  int16_t values[14];
+  uint8_t count = 0;
+  while (count < 14 && at < (int)body.length()) {
+    while (at < (int)body.length() && (body[at] == ' ' || body[at] == ',')) at++;
+    if (at >= (int)body.length() || body[at] == ']') break;
+    if (body.startsWith("null", at)) { values[count++] = -32768; at += 4; continue; }
+    const int end = body.indexOf(',', at) >= 0 ? body.indexOf(',', at) : body.indexOf(']', at);
+    if (end < 0) break;
+    long value = body.substring(at, end).toInt();
+    values[count++] = (int16_t)constrain(value, 0L, 32767L);
+    at = end;
+  }
+  extras_set_linkedin_days(values, count);
+}
+
 // "STARTING" must never be the last word a panel says. Whenever a feed is
 // simply waiting for its next slot, print how long that wait is, so a stuck
 // timer looks different from a stuck fetch.
@@ -1746,6 +1782,7 @@ static void linkedin_tick() {
       // figure. Passing that along as 0 is what made the panel read "+0";
       // instead the weekly number keeps its last real value, or shows a dash.
       extras_set_linkedin((int32_t)followers, (int32_t)gained, b);
+      json_linkedin_days(body);
       extras_feed_ok(0);
     } else {
       // A 200 with no number in it: the app answered, LinkedIn had nothing.
