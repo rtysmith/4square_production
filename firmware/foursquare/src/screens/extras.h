@@ -137,6 +137,7 @@ void extras_tick(uint32_t now_ms, int16_t temp_c10, uint8_t rh, bool sht_ok,
 // it is false the follower total still updates, but the 7-day figure keeps
 // whatever it last knew and draws a dash rather than a confident "+0".
 void extras_set_linkedin(int32_t followers, int32_t gained7d, bool week_known = true);
+void extras_set_linkedin_days(const int16_t *values, uint8_t count);
 bool extras_linkedin_valid();
 bool extras_linkedin_week_valid();
 int32_t extras_linkedin_followers();
