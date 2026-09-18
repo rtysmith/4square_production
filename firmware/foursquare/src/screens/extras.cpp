@@ -557,10 +557,11 @@ void extras_tick(uint32_t now_ms, int16_t temp_c10, uint8_t rh, bool sht_ok,
   if (hist.filled < HIST_N) hist.filled++;
 }
 
-// The oldest sample we hold, which is two hours ago once the buffer has filled.
-static bool hist_oldest(int16_t *temp, uint8_t *rh) {
-  if (hist.filled < 2) return false;
-  const uint8_t idx = (uint8_t)((hist.head + HIST_N - hist.filled) % HIST_N);
+// The sample N minutes in the past. Trend captions use this so the 2-hour
+// humidity spark buffer does not accidentally make "last hour" mean two hours.
+static bool hist_at_ago(int16_t minutes, int16_t *temp, uint8_t *rh) {
+  if (hist.filled <= (uint8_t)minutes) return false;
+  const uint8_t idx = (uint8_t)((hist.head + HIST_N - 1 - minutes) % HIST_N);
   *temp = hist.temp[idx];
   *rh   = hist.rh[idx];
   return true;
@@ -1144,7 +1145,7 @@ void extras_face_render(GFXcanvas1 &c, uint8_t w, uint8_t ov, const FaceData &d)
     }
     case X_TTREND: {
       int16_t t0; uint8_t r0;
-      if (!hist_oldest(&t0, &r0)) { x_pair(c, "1 HR TREND", "WAIT", 2); break; }
+      if (!hist_at_ago(60, &t0, &r0)) { x_pair(c, "1 HR TREND", "WAIT", 2); break; }
       float delta = c_of((int16_t)(d.temp_c10 - t0));
       if (d.temp_f) delta = delta * 9.0f / 5.0f;
       snprintf(b, sizeof b, "%c%.1f", delta >= 0 ? '+' : '-',
@@ -1160,7 +1161,7 @@ void extras_face_render(GFXcanvas1 &c, uint8_t w, uint8_t ov, const FaceData &d)
     }
     case X_RHTREND: {
       int16_t t0; uint8_t r0;
-      if (!hist_oldest(&t0, &r0)) { x_pair(c, "RH TREND", "WAIT", 2); break; }
+      if (!hist_at_ago(60, &t0, &r0)) { x_pair(c, "RH TREND", "WAIT", 2); break; }
       const int delta = (int)d.humidity - (int)r0;
       snprintf(b, sizeof b, "%+d%%", delta);
       x_pair(c, "RH, LAST HOUR", b, 4);
@@ -1460,8 +1461,10 @@ void extras_face_render(GFXcanvas1 &c, uint8_t w, uint8_t ov, const FaceData &d)
     if (((ov_draw >> 4) & 0x0F) == 4) ov_draw &= 0x0F;
   }
   if (w == X_DATELINE) {
-    if ((ov_draw & 0x0F) == 5) ov_draw &= 0xF0;
-    if (((ov_draw >> 4) & 0x0F) == 5) ov_draw &= 0x0F;
+    // The date face owns its upper-right Wi-Fi bars. Ignore any older saved
+    // Wi-Fi overlay so it cannot draw a second indicator at the bottom-right.
+    if ((ov_draw & 0x0F) == 6) ov_draw &= 0xF0;
+    if (((ov_draw >> 4) & 0x0F) == 6) ov_draw &= 0x0F;
   }
   x_overlay(c, ov_draw, d);
 }
