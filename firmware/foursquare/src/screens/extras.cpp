@@ -369,6 +369,9 @@ static int32_t li_followers = 0;
 static int32_t li_gained    = 0;
 static bool    li_valid     = false;
 static bool    li_week_ok   = false;
+static const uint8_t LI_DAY_N = 14;
+static int16_t li_days[LI_DAY_N];
+static uint8_t li_days_count = 0;
 
 static uint8_t wx_icon    = 0;
 static int16_t wx_cur_c10 = 0;
@@ -436,6 +439,15 @@ void extras_set_linkedin(int32_t followers, int32_t gained7d, bool week_known) {
     }
   }
 }
+void extras_set_linkedin_days(const int16_t *values, uint8_t count) {
+  li_days_count = count > LI_DAY_N ? LI_DAY_N : count;
+  for (uint8_t i = 0; i < li_days_count; i++) li_days[i] = values[i];
+  cache_begin();
+  if (cache_open) {
+    remote_cache.putBytes("li_days", li_days, sizeof li_days);
+    remote_cache.putUChar("li_day_n", li_days_count);
+  }
+}
 bool    extras_linkedin_valid()      { return li_valid; }
 bool    extras_linkedin_week_valid() { return li_week_ok; }
 int32_t extras_linkedin_followers()  { return li_followers; }
@@ -450,6 +462,10 @@ void extras_cache_restore() {
     li_valid = true;
     li_week_ok = remote_cache.getBool("li_wk_ok", false);
   }
+  li_days_count = remote_cache.getUChar("li_day_n", 0);
+  if (li_days_count > LI_DAY_N) li_days_count = 0;
+  if (li_days_count > 0 && remote_cache.getBytes("li_days", li_days, sizeof li_days) != sizeof li_days)
+    li_days_count = 0;
   secbar_thick = remote_cache.getUChar("sb_thick", 2);
   if (secbar_thick < 1 || secbar_thick > 4) secbar_thick = 2;
   secbar_ticks = remote_cache.getUChar("sb_ticks", 0);
@@ -583,7 +599,7 @@ static void draw_rh_spark(GFXcanvas1 &c, int16_t x, int16_t y, int16_t w, int16_
   }
 }
 
-static void draw_linkedin_humidity(GFXcanvas1 &c, const FaceData &d) {
+static void draw_date_humidity(GFXcanvas1 &c, const FaceData &d) {
   // Always own the bottom-left corner of this panel. A live reading wins; if
   // the sensor has not answered yet we fall back to the newest stored sample,
   // and if there is nothing at all we say so rather than drawing nothing,
@@ -601,6 +617,29 @@ static void draw_linkedin_humidity(GFXcanvas1 &c, const FaceData &d) {
   const int16_t y = (int16_t)(SAFE_Y0 + SAFE_H - 8);
   x_text(c, t, 1, y, SAFE_X0);
   if (rh <= 100) draw_rh_spark(c, (int16_t)(SAFE_X0 + 24), y, (int16_t)(SAFE_W - 26), 7);
+}
+
+static void draw_linkedin_days(GFXcanvas1 &c) {
+  if (li_days_count == 0) {
+    x_center(c, "NO DAILY HISTORY", 1, (int16_t)(SAFE_Y0 + SAFE_H - 8));
+    return;
+  }
+  int16_t hi = 1;
+  for (uint8_t i = 0; i < li_days_count; i++)
+    if (li_days[i] >= 0 && li_days[i] > hi) hi = li_days[i];
+  const int16_t y = (int16_t)(SAFE_Y0 + 43);
+  const int16_t h = 15;
+  const int16_t gap = 2;
+  const int16_t bar_w = (int16_t)((SAFE_W - (LI_DAY_N - 1) * gap) / LI_DAY_N);
+  for (uint8_t i = 0; i < LI_DAY_N; i++) {
+    const int16_t x = (int16_t)(SAFE_X0 + i * (bar_w + gap));
+    if (i >= li_days_count || li_days[i] < 0) {
+      c.drawPixel((int16_t)(x + bar_w / 2), (int16_t)(y + h - 1), 1);
+      continue;
+    }
+    const int16_t bh = li_days[i] == 0 ? 1 : (int16_t)max(1L, (long)li_days[i] * h / hi);
+    c.fillRect(x, (int16_t)(y + h - bh), bar_w, bh, 1);
+  }
 }
 
 
@@ -1206,12 +1245,12 @@ void extras_face_render(GFXcanvas1 &c, uint8_t w, uint8_t ov, const FaceData &d)
     }
     case X_LIFOLLOWERS: {
       // The panel is called LINKEDIN, whatever it is showing.
-      if (!li_valid) { x_why(c, "LINKEDIN", 0); draw_linkedin_humidity(c, d); break; }
+      if (!li_valid) { x_why(c, "LINKEDIN", 0); break; }
       if (li_followers >= 10000) snprintf(b, sizeof b, "%ld.%ldk", (long)(li_followers / 1000), (long)((li_followers % 1000) / 100));
       else snprintf(b, sizeof b, "%ld", (long)li_followers);
       // Header row: "LINKEDIN" on the left, the weekly gain on the right so
       // the two read as one caption. The big follower count stays centred, and
-      // the full-width two-hour humidity trace owns the bottom edge.
+      // the daily follower bars own the bottom edge.
       x_text(c, "LINKEDIN", 1, (int16_t)(SAFE_Y0 + 3), SAFE_X0);
       char week_t[12];
       if (!li_valid || !li_week_ok) snprintf(week_t, sizeof week_t, "+--");
@@ -1219,7 +1258,7 @@ void extras_face_render(GFXcanvas1 &c, uint8_t w, uint8_t ov, const FaceData &d)
       const int16_t week_w = (int16_t)(strlen(week_t) * 6 - 1);
       x_text(c, week_t, 1, (int16_t)(SAFE_Y0 + 3), (int16_t)(SAFE_X0 + SAFE_W - week_w));
       x_center(c, b, 3, (int16_t)(SAFE_Y0 + 17));
-      draw_linkedin_humidity(c, d);
+      draw_linkedin_days(c);
       break;
     }
     case X_LIWEEK: {
@@ -1267,11 +1306,19 @@ void extras_face_render(GFXcanvas1 &c, uint8_t w, uint8_t ov, const FaceData &d)
           "JUL", "AUG", "SEP", "OCT", "NOV", "DEC" };
       const uint8_t wd = (uint8_t)(d.weekday % 7);
       const uint8_t mo = (uint8_t)((d.month >= 1 && d.month <= 12) ? d.month - 1 : 0);
-      x_center(c, WD[wd], 1, (int16_t)(SAFE_Y0 + 2));
+      snprintf(b, sizeof b, "%s  '%02u", WD[wd], (unsigned)(d.year % 100));
+      x_text(c, b, 1, (int16_t)(SAFE_Y0 + 2), SAFE_X0);
+      const int rssi = ui_env.wifi_up ? ui_env.rssi : -99;
+      const uint8_t bars = rssi > -55 ? 4 : rssi > -66 ? 3 : rssi > -75 ? 2 : rssi > -85 ? 1 : 0;
+      const int16_t rx = (int16_t)(SAFE_X0 + SAFE_W - 20);
+      for (uint8_t i = 0; i < 4; i++) {
+        const int16_t bh = (int16_t)(2 + i * 2);
+        if (i < bars) c.fillRect((int16_t)(rx + i * 5), (int16_t)(SAFE_Y0 + 9 - bh), 3, bh, 1);
+        else          c.drawRect((int16_t)(rx + i * 5), (int16_t)(SAFE_Y0 + 9 - bh), 3, bh, 1);
+      }
       snprintf(b, sizeof b, "%u %s", (unsigned)d.day, MO[mo]);
-      x_center(c, b, 3, (int16_t)(SAFE_Y0 + 14));
-      snprintf(b, sizeof b, "%u", (unsigned)d.year);
-      x_center(c, b, 1, (int16_t)(SAFE_Y0 + 42));
+      x_center(c, b, 3, (int16_t)(SAFE_Y0 + 13));
+      draw_date_humidity(c, d);
       break;
     }
 
@@ -1411,6 +1458,10 @@ void extras_face_render(GFXcanvas1 &c, uint8_t w, uint8_t ov, const FaceData &d)
   if (w == X_LIFOLLOWERS) {
     if ((ov_draw & 0x0F) == 4) ov_draw &= 0xF0;
     if (((ov_draw >> 4) & 0x0F) == 4) ov_draw &= 0x0F;
+  }
+  if (w == X_DATELINE) {
+    if ((ov_draw & 0x0F) == 5) ov_draw &= 0xF0;
+    if (((ov_draw >> 4) & 0x0F) == 5) ov_draw &= 0x0F;
   }
   x_overlay(c, ov_draw, d);
 }
