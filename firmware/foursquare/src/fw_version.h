@@ -1,6 +1,6 @@
 #pragma once
 // Written by the 4square Control Center every time it commits a build.
 // Do not edit by hand: the next build overwrites it.
-#define FOURSQUARE_FW_BUILD   30
-#define FOURSQUARE_FW_VERSION "v34.30"
+#define FOURSQUARE_FW_BUILD   31
+#define FOURSQUARE_FW_VERSION "v35.31"
 #define FOURSQUARE_BUILT_BY   "SWYR.com"
