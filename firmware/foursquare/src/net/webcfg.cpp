@@ -47,7 +47,7 @@
 #define FOURSQUARE_BUILD_ID "unknown"
 #endif
 
-#define WEBCFG_API 34  // 34 = date-panel status strip and 14-day LinkedIn bars
+#define WEBCFG_API 35  // 35 = suppress duplicate saved Wi-Fi overlay on date panel
 
 static WebServer  server(80);
 static bool       started  = false;
