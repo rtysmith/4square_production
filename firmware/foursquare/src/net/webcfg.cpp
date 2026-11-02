@@ -47,7 +47,7 @@
 #define FOURSQUARE_BUILD_ID "unknown"
 #endif
 
-#define WEBCFG_API 35  // 35 = suppress duplicate saved Wi-Fi overlay on date panel
+#define WEBCFG_API 38  // 38 = internet time with automatic daylight saving + restart reports
 
 static WebServer  server(80);
 static bool       started  = false;
@@ -1291,6 +1291,20 @@ static void handle_restart() {
 
 }
 
+// Set the clock from the browser: /api/time?y=&mo=&d=&h=&mi=&s= (local time).
+static void handle_time() {
+  cors();
+  const int y = server.arg("y").toInt(), mo = server.arg("mo").toInt(), d = server.arg("d").toInt();
+  const int h = server.arg("h").toInt(), mi = server.arg("mi").toInt(), s = server.arg("s").toInt();
+  if (y < 2024 || y > 2099 || mo < 1 || mo > 12 || d < 1 || d > 31 ||
+      h < 0 || h > 23 || mi < 0 || mi > 59 || s < 0 || s > 59) {
+    send_json(400, "{\"ok\":false,\"error\":\"bad time\"}");
+    return;
+  }
+  rtc_write_time((uint16_t)y, (uint8_t)mo, (uint8_t)d, (uint8_t)h, (uint8_t)mi, (uint8_t)s);
+  send_json(200, "{\"ok\":true}");
+}
+
 // WHY THE RADIO KEPT DISAPPEARING: the ESP32 default is modem sleep, which
 // parks the receiver between DTIM beacons to save a few milliamps. On a
 // mains-powered clock that saving buys nothing and costs everything — the
@@ -1581,6 +1595,8 @@ void webcfg_begin() {
   server.on("/api/extras", HTTP_GET,  handle_extras);
   server.on("/api/extras", HTTP_POST, handle_extras);
   server.on("/api/restart", HTTP_POST, handle_restart);
+  server.on("/api/time", HTTP_GET,  handle_time);
+  server.on("/api/time", HTTP_POST, handle_time);
   server.on("/api/wifi", HTTP_GET,  handle_wifi_read);
   server.on("/api/wifi", HTTP_POST, handle_wifi_save);
   server.on("/api/wifi/forget", HTTP_POST, handle_wifi_forget);
@@ -1757,7 +1773,16 @@ static void linkedin_tick() {
   tls.setTimeout(12);
   tls.setHandshakeTimeout(12);
   HTTPClient http;
-  if (!http.begin(tls, LINKEDIN_URL)) {
+  // Every read also carries this run's restart diagnostics, so the app keeps
+  // a history of why the clock rebooted even when nobody was watching.
+  char li_url[360];
+  snprintf(li_url, sizeof li_url,
+           "%s?v=%s&boots=%lu&rst=%u&prev_up=%lu&prev_mh=%lu&up=%lu&heap=%lu&mh=%lu&rssi=%d&rec=%lu",
+           LINKEDIN_URL, extras_fw_version(), (unsigned long)diag_boots, (unsigned)diag_reset_code,
+           (unsigned long)diag_prev_uptime, (unsigned long)diag_prev_minheap,
+           (unsigned long)(now / 1000u), (unsigned long)ESP.getFreeHeap(),
+           (unsigned long)ESP.getMinFreeHeap(), (int)WiFi.RSSI(), (unsigned long)wifi_recoveries);
+  if (!http.begin(tls, li_url)) {
     extras_feed_note(0, "BAD URL");
     li_next_ms = now + 30000u;
     return;
@@ -1966,6 +1991,51 @@ static void sports_tick() {
   else { extras_feed_note(3, "NO GAMES"); sp_next_ms = now + 60000u; }
 }
 
+// ---- internet time + daylight saving -------------------------------------
+// The DS3231 only counts; it knows nothing about time zones, so the clock used
+// to stay an hour off after every DST change until someone set it over USB.
+// Once Wi-Fi is up, SNTP runs in the background (lwIP, non-blocking) with the
+// US Eastern rule, and once a minute the local wall time is compared with the
+// chip. Any drift of 2 s or more - including the DST hour - is written back.
+static const char *const CLOCK_TZ = "EST5EDT,M3.2.0,M11.1.0";
+static bool     ntp_started = false;
+static uint32_t ntp_check_ms = 0;
+
+static long civil_days(int y, int m, int d) {
+  y -= m <= 2;
+  const long era = (y >= 0 ? y : y - 399) / 400;
+  const long yoe = y - era * 400;
+  const long doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+  const long doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+  return era * 146097 + doe - 719468;
+}
+
+static void time_tick() {
+  if (updating) return;
+  const uint32_t now = millis();
+  if (WiFi.status() != WL_CONNECTED || (uint32_t)WiFi.localIP() == 0u) return;
+  if (!ntp_started) {
+    configTzTime(CLOCK_TZ, "pool.ntp.org", "time.google.com", "time.nist.gov");
+    ntp_started = true;
+    ntp_check_ms = now + 15000u;   // give the first SNTP reply a moment
+    return;
+  }
+  if ((int32_t)(now - ntp_check_ms) < 0) return;
+  ntp_check_ms = now + 60000u;
+  struct tm lt;
+  if (!getLocalTime(&lt, 0) || lt.tm_year + 1900 < 2024) return;   // not synced yet
+  const RtcTime r = rtc_now(now);
+  const long net_s = civil_days(lt.tm_year + 1900, lt.tm_mon + 1, lt.tm_mday) * 86400L +
+                     lt.tm_hour * 3600L + lt.tm_min * 60L + lt.tm_sec;
+  const long rtc_s = r.ok ? civil_days(r.year, r.mon, r.day) * 86400L +
+                     r.hour * 3600L + r.min * 60L + r.sec : 0;
+  const long drift = net_s - rtc_s;
+  if (r.ok && drift > -2 && drift < 2) return;
+  rtc_write_time((uint16_t)(lt.tm_year + 1900), (uint8_t)(lt.tm_mon + 1), (uint8_t)lt.tm_mday,
+                 (uint8_t)lt.tm_hour, (uint8_t)lt.tm_min, (uint8_t)lt.tm_sec);
+  Serial.printf("# clock set from internet time (was off by %lds)\n", drift);
+}
+
 void webcfg_tick() {
   if (!started) return;
   server.handleClient();
@@ -2016,6 +2086,7 @@ void webcfg_tick() {
   weather_tick();
   market_tick();
   sports_tick();
+  time_tick();
   feed_in_pass = false;
 }
 #endif  // !DEMO_BUILD
