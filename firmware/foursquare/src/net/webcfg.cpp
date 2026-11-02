@@ -47,7 +47,7 @@
 #define FOURSQUARE_BUILD_ID "unknown"
 #endif
 
-#define WEBCFG_API 38  // 38 = internet time with automatic daylight saving + restart reports
+#define WEBCFG_API 39  // 39 = crash breadcrumbs, bigger loop stack, watchdog-safe DNS and web server
 
 static WebServer  server(80);
 static bool       started  = false;
@@ -85,6 +85,34 @@ static uint32_t diag_boots        = 0;   // reboots recorded on this clock
 static uint32_t diag_save_ms      = 0;
 static bool     diag_ready        = false;
 
+// ---- WHERE WAS IT WHEN IT WENT DOWN? ---------------------------------------
+// The reset reason says HOW the clock died (crash, watchdog); this says WHAT
+// it was doing. RTC_NOINIT memory survives a crash or watchdog reset but not a
+// power cut, so the magic word tells a real breadcrumb from power-on noise.
+// The previous run's breadcrumb and its lowest stack headroom ride along with
+// the next LinkedIn read, so the app's history names the culprit directly.
+static RTC_NOINIT_ATTR uint32_t crumb_magic;
+static RTC_NOINIT_ATTR uint32_t crumb_stage;
+static const uint32_t CRUMB_MAGIC = 0x45A1C0DEu;
+enum : uint8_t {
+  ST_NONE = 0, ST_BOOT, ST_OTHER, ST_KEEPER, ST_SERVER, ST_HIST,
+  ST_LI_DNS, ST_LI_GET, ST_LI_READ, ST_WX_DNS, ST_WX_GET, ST_WX_READ,
+  ST_MARKET, ST_SPORTS, ST_NTP
+};
+static uint8_t  diag_prev_stage   = 0;   // what the previous run was doing at the end
+static uint32_t diag_prev_stack   = 0;   // its lowest free loop-task stack, bytes
+static uint32_t diag_stack_low    = 0xFFFFFFFFu;
+static inline void crumb(uint8_t s) { crumb_stage = s; crumb_magic = CRUMB_MAGIC; }
+struct CrumbOnExit {
+  uint8_t after;
+  explicit CrumbOnExit(uint8_t a) : after(a) {}
+  ~CrumbOnExit() { crumb(after); }
+};
+static void diag_stack_sample() {
+  const uint32_t hw = (uint32_t)uxTaskGetStackHighWaterMark(NULL);
+  if (hw < diag_stack_low) diag_stack_low = hw;
+}
+
 static const char *diag_reason_text(uint8_t code) {
   switch ((esp_reset_reason_t)code) {
     case ESP_RST_POWERON:  return "POWER ON";
@@ -111,9 +139,13 @@ static void diag_boot_note() {
   if (diag_ready) return;
   diag_ready = true;
   diag_reset_code = (uint8_t)esp_reset_reason();
+  diag_prev_stage = (crumb_magic == CRUMB_MAGIC && crumb_stage <= ST_NTP) ? (uint8_t)crumb_stage : 0;
+  crumb(ST_BOOT);
   if (diag_prefs.begin("4sqdiag", false)) {
     diag_prev_uptime  = diag_prefs.getUInt("up", 0);
     diag_prev_minheap = diag_prefs.getUInt("mh", 0);
+    diag_prev_stack   = diag_prefs.getUInt("stk", 0);
+    diag_prefs.putUInt("stk", 0);
     diag_boots        = diag_prefs.getUInt("boots", 0) + 1u;
     diag_prefs.putUInt("boots", diag_boots);
     diag_prefs.putUChar("last", diag_reset_code);
@@ -134,6 +166,8 @@ static void diag_heartbeat(uint32_t now) {
   if (!diag_prefs.begin("4sqdiag", false)) return;
   diag_prefs.putUInt("up", now / 1000u);
   diag_prefs.putUInt("mh", (uint32_t)ESP.getMinFreeHeap());
+  diag_stack_sample();
+  diag_prefs.putUInt("stk", diag_stack_low);
   diag_prefs.end();
 }
 
@@ -607,6 +641,8 @@ void webcfg_wifi_keeper_tick() {
     extras_cache_restore();
   }
   const uint32_t now = millis();
+  crumb(ST_KEEPER);
+  CrumbOnExit leave_keeper(ST_OTHER);   // anything after this is display/buttons code
   // Read the reset reason once, then leave a breadcrumb every minute so the
   // next boot can say how long this run lasted. This is the only way to tell
   // "the Wi-Fi dropped" from "the clock rebooted".
@@ -617,7 +653,15 @@ void webcfg_wifi_keeper_tick() {
   // server pumped at full speed rather than four times a second.
   if (portal_active) {
     portal_dns.processNextRequest();
-    if (started) server.handleClient();
+    if (started) {
+      // A slow phone can hold one request for several seconds; that is not a
+      // hung clock, so the loop watchdog sits this call out.
+      crumb(ST_SERVER);
+      disableLoopWDT();
+      server.handleClient();
+      if (!updating) enableLoopWDT();
+      crumb(ST_KEEPER);
+    }
     ui_env.wifi_up = false;
     ui_env.ota_ready = false;
     extras_feed_note(0, "WIFI SETUP");
@@ -1763,6 +1807,10 @@ static void linkedin_tick() {
   feed_slot_take(now);
   li_next_ms = now + 15u * 60u * 1000u;
   extras_feed_note(0, "FETCHING");
+  // TASK WATCHDOG FIX: the name lookup used to run BEFORE the watchdog was
+  // paused, and a slow resolver blocks for longer than its five seconds.
+  WdtPause wdt;
+  crumb(ST_LI_DNS);
   if (!host_resolves(0) || !enough_heap(0)) { li_next_ms = now + 30000u; return; }
 
   WiFiClientSecure tls;
@@ -1777,8 +1825,10 @@ static void linkedin_tick() {
   // a history of why the clock rebooted even when nobody was watching.
   char li_url[360];
   snprintf(li_url, sizeof li_url,
-           "%s?v=%s&boots=%lu&rst=%u&prev_up=%lu&prev_mh=%lu&up=%lu&heap=%lu&mh=%lu&rssi=%d&rec=%lu",
+           "%s?v=%s&boots=%lu&rst=%u&stage=%u&pstk=%lu&stk=%lu&prev_up=%lu&prev_mh=%lu&up=%lu&heap=%lu&mh=%lu&rssi=%d&rec=%lu",
            LINKEDIN_URL, extras_fw_version(), (unsigned long)diag_boots, (unsigned)diag_reset_code,
+           (unsigned)diag_prev_stage, (unsigned long)diag_prev_stack,
+           (unsigned long)(diag_stack_low == 0xFFFFFFFFu ? 0u : diag_stack_low),
            (unsigned long)diag_prev_uptime, (unsigned long)diag_prev_minheap,
            (unsigned long)(now / 1000u), (unsigned long)ESP.getFreeHeap(),
            (unsigned long)ESP.getMinFreeHeap(), (int)WiFi.RSSI(), (unsigned long)wifi_recoveries);
@@ -1793,11 +1843,13 @@ static void linkedin_tick() {
   // DNS, TLS, headers, and body reads are all synchronous in HTTPClient. Keep
   // the loop watchdog out of this finite background transaction; otherwise a
   // slow DNS/TLS exchange can reset the whole clock seconds after startup.
-  // The guard restores the watchdog on EVERY exit from here on, including the
-  // early returns that previously left it off for the rest of the run.
-  WdtPause wdt;
+  // The guard (taken above) restores the watchdog on EVERY exit, including
+  // the early returns that previously left it off for the rest of the run.
+  crumb(ST_LI_GET);
   const int code = http.GET();
+  diag_stack_sample();
   if (code == 200) {
+    crumb(ST_LI_READ);
     const String body = http.getString();
     bool a = false, b = false;
     const long followers = json_long(body, "\"followers\":", &a);
@@ -1843,6 +1895,8 @@ static void weather_tick() {
   feed_slot_take(now);
   wx_next_ms = now + 20u * 60u * 1000u;
   extras_feed_note(1, "FETCHING");
+  WdtPause wdt;
+  crumb(ST_WX_DNS);
   if (!host_resolves(1) || !enough_heap(1)) { wx_next_ms = now + 30000u; return; }
 
   WiFiClientSecure tls;
@@ -1858,9 +1912,11 @@ static void weather_tick() {
   http.setReuse(false);
   http.setConnectTimeout(8000);
   http.setTimeout(12000);
-  WdtPause wdt;
+  crumb(ST_WX_GET);
   const int code = http.GET();
+  diag_stack_sample();
   if (code == 200) {
+    crumb(ST_WX_READ);
     const String body = http.getString();
     bool a = false, b = false, cc = false, dd = false;
     const long icon = json_long(body, "\"icon\":", &a);
@@ -1901,6 +1957,8 @@ static const char *const HOST_BASE =
   "https://project--93f6b6d0-48fb-4dbe-87b6-455b65129623.lovable.app";
 
 static bool feed_get_lines(const String &url, uint8_t which, String *out) {
+  WdtPause wdt;
+  crumb(which == 2 ? ST_MARKET : ST_SPORTS);
   if (!host_resolves(which) || !enough_heap(which)) return false;
   WiFiClientSecure tls;
   tls.setInsecure();
@@ -1911,8 +1969,8 @@ static bool feed_get_lines(const String &url, uint8_t which, String *out) {
   http.setReuse(false);
   http.setConnectTimeout(8000);
   http.setTimeout(12000);
-  WdtPause wdt;
   const int code = http.GET();
+  diag_stack_sample();
   bool ok = false;
   if (code == 200) { *out = http.getString(); ok = true; }
   else { note_http_error(which, code); }
@@ -2038,7 +2096,13 @@ static void time_tick() {
 
 void webcfg_tick() {
   if (!started) return;
+  // TASK WATCHDOG FIX: a browser on weak Wi-Fi can keep one request open for
+  // longer than the five-second loop watchdog. That is a slow client, not a
+  // stuck clock; WebServer has its own timeouts, so the watchdog sits it out.
+  crumb(ST_SERVER);
+  disableLoopWDT();
   server.handleClient();
+  if (!updating) enableLoopWDT();
 
   if (portal_switch_pending) {
     portal_switch_pending = false;
@@ -2073,6 +2137,7 @@ void webcfg_tick() {
 
   // The rolling history behind the trend and high/low screens. Cheap, and it
   // has to run even while the panels are showing something else.
+  crumb(ST_HIST);
   extras_tick(millis(), ui_env.sht_ok ? (int16_t)(ui_env.sht_c * 10.0f) : 0,
               ui_env.rh, ui_env.sht_ok, rtc_now(millis()).hour);
 
@@ -2086,7 +2151,10 @@ void webcfg_tick() {
   weather_tick();
   market_tick();
   sports_tick();
+  crumb(ST_NTP);
   time_tick();
   feed_in_pass = false;
+  diag_stack_sample();
+  crumb(ST_KEEPER);
 }
 #endif  // !DEMO_BUILD
