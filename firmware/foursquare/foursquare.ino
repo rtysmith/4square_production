@@ -57,6 +57,9 @@
 #include "src/screens/anim.h"
 #include "src/net/market.h"
 #include "src/app/ui.h"
+#ifdef SET_LOOP_TASK_STACK_SIZE
+SET_LOOP_TASK_STACK_SIZE(16 * 1024);  // TLS runs on the loop task
+#endif
 #include "src/net/webcfg.h"  // HTTP layout + browser-friendly updates
 #include "src/app/leds.h"
 #include "src/board/sensors.h"
