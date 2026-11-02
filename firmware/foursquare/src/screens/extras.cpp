@@ -620,6 +620,17 @@ static void draw_date_humidity(GFXcanvas1 &c, const FaceData &d) {
   if (rh <= 100) draw_rh_spark(c, (int16_t)(SAFE_X0 + 24), y, (int16_t)(SAFE_W - 26), 7);
 }
 
+static void fmt_linkedin_followers(char *out, size_t out_len, int32_t followers) {
+  if (followers >= 10000) {
+    // One decimal, rounded instead of truncated: 46,965 becomes 47.0k.
+    const int32_t tenths = (followers + 50) / 100;
+    snprintf(out, out_len, "%ld.%ldk", (long)(tenths / 10), (long)(tenths % 10));
+  } else {
+    snprintf(out, out_len, "%ld", (long)followers);
+  }
+}
+
+
 static void draw_linkedin_days(GFXcanvas1 &c) {
   if (li_days_count == 0) {
     x_center(c, "NO DAILY HISTORY", 1, (int16_t)(SAFE_Y0 + SAFE_H - 8));
@@ -1247,15 +1258,12 @@ void extras_face_render(GFXcanvas1 &c, uint8_t w, uint8_t ov, const FaceData &d)
     case X_LIFOLLOWERS: {
       // The panel is called LINKEDIN, whatever it is showing.
       if (!li_valid) { x_why(c, "LINKEDIN", 0); break; }
-      if (li_followers >= 10000) snprintf(b, sizeof b, "%ld.%ldk", (long)(li_followers / 1000), (long)((li_followers % 1000) / 100));
-      else snprintf(b, sizeof b, "%ld", (long)li_followers);
-      // Header row: "LINKEDIN" on the left, the weekly gain on the right so
-      // the two read as one caption. The big follower count stays centred, and
-      // the daily follower bars own the bottom edge.
+      fmt_linkedin_followers(b, sizeof b, li_followers);
+      // Header row: "LINKEDIN" on the left, the seven-day gain on the right.
       x_text(c, "LINKEDIN", 1, (int16_t)(SAFE_Y0 + 3), SAFE_X0);
       char week_t[12];
-      if (!li_valid || !li_week_ok) snprintf(week_t, sizeof week_t, "+--");
-      else                         snprintf(week_t, sizeof week_t, "%+ld", (long)li_gained);
+      if (li_week_ok) snprintf(week_t, sizeof week_t, "%+d", (int)li_gained);
+      else            snprintf(week_t, sizeof week_t, "+--");
       const int16_t week_w = (int16_t)(strlen(week_t) * 6 - 1);
       x_text(c, week_t, 1, (int16_t)(SAFE_Y0 + 3), (int16_t)(SAFE_X0 + SAFE_W - week_w));
       x_center(c, b, 3, (int16_t)(SAFE_Y0 + 17));
