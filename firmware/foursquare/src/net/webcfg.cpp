@@ -47,7 +47,7 @@
 #define FOURSQUARE_BUILD_ID "unknown"
 #endif
 
-#define WEBCFG_API 39  // 39 = crash breadcrumbs, bigger loop stack, watchdog-safe DNS and web server
+#define WEBCFG_API 40  // 40 = name service started once (no teardown on reconnect), DHCP forced only after a lease failure, finer crash breadcrumbs
 
 static WebServer  server(80);
 static bool       started  = false;
@@ -97,7 +97,11 @@ static const uint32_t CRUMB_MAGIC = 0x45A1C0DEu;
 enum : uint8_t {
   ST_NONE = 0, ST_BOOT, ST_OTHER, ST_KEEPER, ST_SERVER, ST_HIST,
   ST_LI_DNS, ST_LI_GET, ST_LI_READ, ST_WX_DNS, ST_WX_GET, ST_WX_READ,
-  ST_MARKET, ST_SPORTS, ST_NTP
+  ST_MARKET, ST_SPORTS, ST_NTP,
+  // v40: the keeper split into its risky steps, because every v39 crash
+  // landed somewhere inside "WIFI KEEPER" and that was not specific enough.
+  ST_K_NOTE, ST_K_JOIN, ST_K_DHCP, ST_K_SCAN, ST_K_ONLINE, ST_K_MDNS,
+  ST_LAST = ST_K_MDNS
 };
 static uint8_t  diag_prev_stage   = 0;   // what the previous run was doing at the end
 static uint32_t diag_prev_stack   = 0;   // its lowest free loop-task stack, bytes
@@ -139,7 +143,7 @@ static void diag_boot_note() {
   if (diag_ready) return;
   diag_ready = true;
   diag_reset_code = (uint8_t)esp_reset_reason();
-  diag_prev_stage = (crumb_magic == CRUMB_MAGIC && crumb_stage <= ST_NTP) ? (uint8_t)crumb_stage : 0;
+  diag_prev_stage = (crumb_magic == CRUMB_MAGIC && crumb_stage <= ST_LAST) ? (uint8_t)crumb_stage : 0;
   crumb(ST_BOOT);
   if (diag_prefs.begin("4sqdiag", false)) {
     diag_prev_uptime  = diag_prefs.getUInt("up", 0);
@@ -460,6 +464,7 @@ static bool wifi_scan_fresh(uint32_t now) {
 }
 
 static void wifi_scan_begin(uint32_t now) {
+  crumb(ST_K_SCAN);
   WiFi.mode(WIFI_STA);
   WiFi.scanDelete();
   WiFi.scanNetworks(true, false);
@@ -574,6 +579,13 @@ static void wifi_check_giveup() {
 }
 
 static void wifi_keeper_start_join(uint32_t now, bool reset_radio) {
+  crumb(ST_K_JOIN);
+  // Only a join that follows a "no address" failure needs the DHCP client
+  // forced. Doing it on EVERY rejoin wiped the station address out from under
+  // the web server and name-service sockets while the driver was mid-
+  // association - one of the two suspects for the v39 "CRASH @ WIFI KEEPER".
+  // The driver restarts DHCP by itself on each fresh association.
+  const bool force_dhcp = (wifi_last_failure == 4);
   if (reset_radio) {
     Serial.println("# wifi keeper: recycling radio only; displays stay live");
     wifi_last_failure = 5;
@@ -600,7 +612,7 @@ static void wifi_keeper_start_join(uint32_t now, bool reset_radio) {
   // WiFi.config() with INADDR_NONE is core-version dependent and on some builds
   // leaves the station with a bogus static address, which is exactly the
   // "associated, 0.0.0.0 forever" symptom - so drive esp_netif directly.
-  wifi_force_dhcp();
+  if (force_dhcp) { crumb(ST_K_DHCP); wifi_force_dhcp(); crumb(ST_K_JOIN); }
 
 
   const bool have_second = net_have_second();
@@ -647,7 +659,9 @@ void webcfg_wifi_keeper_tick() {
   // next boot can say how long this run lasted. This is the only way to tell
   // "the Wi-Fi dropped" from "the clock rebooted".
   diag_boot_note();
+  crumb(ST_K_NOTE);
   diag_heartbeat(now);
+  crumb(ST_KEEPER);
 
   // SETUP MODE runs instead of the station machine, and it needs the HTTP
   // server pumped at full speed rather than four times a second.
@@ -708,6 +722,7 @@ void webcfg_wifi_keeper_tick() {
   const bool have_lease = (uint32_t)WiFi.localIP() != 0u;
 
   if (status == WL_CONNECTED && have_lease) {
+    crumb(ST_K_ONLINE);
     const bool newly_up = !wifi_seen_up;
     const uint32_t outage_ms = wifi_down_since_ms ? (uint32_t)(now - wifi_down_since_ms) : 0;
     wifi_seen_up = true;
@@ -781,12 +796,20 @@ void webcfg_wifi_keeper_tick() {
         wifi_have_bssid = true;
       }
       led_hold(LED_WIFI_JOINING, false);
-      // mDNS can lose its netif when the radio is recycled. Rebind it on every
-      // recovered association so foursquare-revo.local remains dependable.
-      MDNS.end();
-      if (MDNS.begin("foursquare-revo")) {
-        MDNS.addService("http", "tcp", 80);
-        MDNS.addServiceTxt("http", "tcp", "device", "4square");
+      // CRASH FIX (v40): start the name service ONCE and never stop it.
+      // v39 tore it down and rebuilt it on every reconnect; MDNS.end() frees
+      // the service while its own task can still be answering a packet, which
+      // panics the chip. Every v39 restart was "CRASH @ WIFI KEEPER" with a
+      // Wi-Fi recovery logged first. The service follows reconnects by itself.
+      static bool mdns_started = false;
+      if (!mdns_started) {
+        crumb(ST_K_MDNS);
+        if (MDNS.begin("foursquare-revo")) {
+          MDNS.addService("http", "tcp", 80);
+          MDNS.addServiceTxt("http", "tcp", "device", "4square");
+          mdns_started = true;
+        }
+        crumb(ST_K_ONLINE);
       }
     }
     // The keeper replaced the stock wifi_tick() call. That old function was
@@ -1361,9 +1384,23 @@ static void handle_time() {
 // made a brief signal dip turn into a long outage.
 // The setup page itself: one form, no JavaScript, readable on a phone that
 // has just joined an access point with no internet behind it.
+// Saved network names are user-controlled; escape them before they go into HTML.
+static String html_attr(const String &in) {
+  String out; out.reserve(in.length() + 8);
+  for (size_t i = 0; i < in.length(); i++) {
+    const char c = in[i];
+    if (c == '&') out += F("&amp;");
+    else if (c == '"') out += F("&quot;");
+    else if (c == '\'') out += F("&#39;");
+    else if (c == '<') out += F("&lt;");
+    else if (c == '>') out += F("&gt;");
+    else out += c;
+  }
+  return out;
+}
 static void handle_portal_root() {
   cors();
-  String saved1 = net_ssid(0), saved2 = net_ssid(1);
+  String saved1 = html_attr(net_ssid(0)), saved2 = html_attr(net_ssid(1));
   String page =
     F("<!doctype html><html><head><meta charset=utf-8>"
       "<meta name=viewport content=\"width=device-width,initial-scale=1\">"
